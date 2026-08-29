@@ -1,0 +1,98 @@
+# =============================================================================
+# ESP32-S3 CSI Fall Detection System — Configuration
+# =============================================================================
+# This file centralises every tuneable parameter for the data-collection,
+# preprocessing, training, and inference pipelines.
+# =============================================================================
+
+# ── Hardware ─────────────────────────────────────────────────────────────────
+hardware:
+  sender:
+    port: "COM5"                  # ESP32-S3 with normal PCB antenna
+    description: "CSI sender (PCB antenna)"
+  receiver:
+    port: "COM3"                  # ESP32-S3 with 6 dBi external antenna
+    description: "CSI receiver (6 dBi external antenna)"
+  baud_rate: 921600
+
+# ── WiFi ─────────────────────────────────────────────────────────────────────
+wifi:
+  ssid: "CSI_SENDER"
+  password: "csi12345678"
+  channel: 6
+
+# ── CSI Parameters ───────────────────────────────────────────────────────────
+csi:
+  sample_rate: 100                # Target packets / second
+  sample_duration: 10             # Seconds per recording
+  num_subcarriers: 52             # Number of OFDM subcarriers (HT20)
+  bandwidth: 20                   # MHz
+
+# ── Directory Paths ──────────────────────────────────────────────────────────
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  model_saved: "model/saved"
+  logs: "logs"
+
+# ── Preprocessing ────────────────────────────────────────────────────────────
+preprocessing:
+  # Hampel outlier filter
+  hampel_window: 5
+  hampel_threshold: 3.0
+
+  # Butterworth low-pass filter
+  butterworth_cutoff: 10          # Hz (lowered from 30Hz to reduce jitter)
+  butterworth_order: 4
+
+  # PCA dimensionality reduction
+  pca_components: 20
+
+  # Sliding-window segmentation
+  window_size: 100                # Samples per window
+  window_overlap: 0.5             # Fractional overlap [0, 1)
+
+  # Normalisation method: "zscore" | "minmax"
+  normalization: "zscore"
+
+# ── Model Hyperparameters ────────────────────────────────────────────────────
+model:
+  # CNN feature extractor
+  cnn_filters: [64, 128]
+  kernel_size: 3
+
+  # LSTM temporal encoder
+  lstm_hidden: 128
+  lstm_layers: 2
+  lstm_dropout: 0.3
+
+  # Multi-head self-attention
+  attention_heads: 4
+
+  # Fully-connected classifier
+  fc_hidden: 64
+  num_classes: 2                  # Binary: fall vs. non-fall
+
+  # Training
+  learning_rate: 0.001
+  batch_size: 32
+  epochs: 100
+  early_stopping_patience: 10
+
+# ── Activity Labels ──────────────────────────────────────────────────────────
+# Binary classification: 0 = fall, 1 = daily activity
+activity_labels:
+  fall:
+    label: 0
+    activities:
+      - fall_forward
+      - fall_backward
+      - fall_sideways
+  daily:
+    label: 1
+    activities:
+      - walking
+      - sitting_down
+      - standing_up
+      - lying_down
+      - empty_room
