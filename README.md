@@ -29,16 +29,18 @@ This project uses two ESP32-S3 development boards to capture WiFi CSI data and a
 ESP-CSI/
 ├── esp-csi/                    # Espressif ESP-CSI framework (cloned)
 ├── firmware/
-│   ├── csi_sender/             # Sender firmware (→ flash to COM5)
-│   └── csi_receiver/           # Receiver firmware (→ flash to COM3)
+│   └── esp8266_tx_beacon/      # Multi-node TX beacon firmware
 ├── data/
 │   ├── raw/                    # Raw CSI recordings by activity type
-│   └── processed/              # Preprocessed tensors (X.npy, y.npy)
+│   └── processed/              # Preprocessed tensors (X.npy, y.npy, pipeline_state.pkl)
 ├── scripts/
 │   ├── parse_csi.py            # CSI data parsing utilities
 │   ├── collect_csi.py          # Interactive data collection tool
-│   ├── preprocess.py           # Signal preprocessing pipeline
-│   └── visualize_csi.py        # Real-time CSI visualization
+│   ├── preprocess.py           # Signal preprocessing pipeline (Hampel, Butter, Global PCA)
+│   ├── realtime_detect.py      # Real-time fall detection runtime engine
+│   ├── generate_synthetic_falls.py # Synthetic fall generator for offline testing
+│   ├── visualize_csi.py        # Real-time CSI visualization
+│   └── visualize_heatmap.py    # 2D Spatial movement heatmap
 ├── model/
 │   ├── dataset.py              # PyTorch Dataset for CSI data
 │   ├── cnn_lstm.py             # CNN-LSTM-Attention model architecture
@@ -96,6 +98,18 @@ python model/train.py
 ### 7. Evaluate
 ```bash
 python model/evaluate.py
+```
+
+### 8. Real-Time Fall Detection Runtime
+```bash
+# Live detection with ESP32-S3:
+python scripts/realtime_detect.py --port COM3
+
+# Offline test / replay without hardware:
+python scripts/realtime_detect.py --replay data/raw/walking/sample_20260715_192540.csv
+
+# Or synthetic streaming mock:
+python scripts/realtime_detect.py --mock
 ```
 
 ## Model Architecture
