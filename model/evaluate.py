@@ -148,8 +148,8 @@ def plot_roc_curve(
 ) -> float:
     """Generate and save a ROC curve with AUC score.
 
-    Uses the probability of the positive class (non-fall=1) or
-    equivalently 1 minus the fall probability.
+    The positive class is explicitly **Class 0 (Fall)** — the rare class of
+    interest. The score is the model's fall probability (``y_probs[:, 0]``).
 
     Args:
         y_true: Ground truth labels.
@@ -157,12 +157,12 @@ def plot_roc_curve(
         save_path: File path to save the plot.
 
     Returns:
-        AUC score.
+        AUC score (fall as positive class).
     """
-    # For binary classification, use probability of class 1 (non-fall)
-    y_score = y_probs[:, 1]
+    y_true_fall = (y_true == 0).astype(int)
+    y_score = y_probs[:, 0]  # probability of fall
 
-    fpr, tpr, thresholds = roc_curve(y_true, y_score)
+    fpr, tpr, thresholds = roc_curve(y_true_fall, y_score, pos_label=1)
     roc_auc = auc(fpr, tpr)
 
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -170,7 +170,7 @@ def plot_roc_curve(
         fpr, tpr,
         color="#2563EB",
         lw=2,
-        label=f"ROC Curve (AUC = {roc_auc:.4f})",
+        label=f"ROC Curve — Fall vs Non-Fall (AUC = {roc_auc:.4f})",
     )
     ax.plot([0, 1], [0, 1], color="gray", lw=1, linestyle="--", label="Random Baseline")
     ax.fill_between(fpr, tpr, alpha=0.1, color="#2563EB")
@@ -178,14 +178,14 @@ def plot_roc_curve(
     ax.set_xlim([0.0, 1.0])
     ax.set_ylim([0.0, 1.05])
     ax.set_xlabel("False Positive Rate", fontsize=12)
-    ax.set_ylabel("True Positive Rate", fontsize=12)
-    ax.set_title("ROC Curve — CSI Fall Detection", fontsize=14, fontweight="bold")
+    ax.set_ylabel("True Positive Rate (Fall)", fontsize=12)
+    ax.set_title("ROC Curve — CSI Fall Detection (positive = Fall)", fontsize=14, fontweight="bold")
     ax.legend(loc="lower right", fontsize=11)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info("ROC curve saved to %s (AUC: %.4f)", save_path, roc_auc)
+    logger.info("ROC curve saved to %s (Fall AUC: %.4f)", save_path, roc_auc)
 
     return roc_auc
 
@@ -197,17 +197,22 @@ def plot_precision_recall_curve(
 ) -> float:
     """Generate and save a Precision-Recall curve.
 
+    The positive class is explicitly **Class 0 (Fall)**; scores are the fall
+    probabilities (``y_probs[:, 0]``), which is the correct convention for a
+    rare-event detector (PR on the majority class would be misleadingly high).
+
     Args:
         y_true: Ground truth labels.
         y_probs: Predicted probabilities of shape (N, num_classes).
         save_path: File path to save the plot.
 
     Returns:
-        Average precision (area under PR curve).
+        Average precision (area under PR curve, fall as positive class).
     """
-    y_score = y_probs[:, 1]
+    y_true_fall = (y_true == 0).astype(int)
+    y_score = y_probs[:, 0]
 
-    precision, recall, thresholds = precision_recall_curve(y_true, y_score)
+    precision, recall, thresholds = precision_recall_curve(y_true_fall, y_score, pos_label=1)
     pr_auc = auc(recall, precision)
 
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -215,21 +220,21 @@ def plot_precision_recall_curve(
         recall, precision,
         color="#059669",
         lw=2,
-        label=f"PR Curve (AUC = {pr_auc:.4f})",
+        label=f"PR Curve — Fall (AUC = {pr_auc:.4f})",
     )
     ax.fill_between(recall, precision, alpha=0.1, color="#059669")
 
     ax.set_xlim([0.0, 1.0])
     ax.set_ylim([0.0, 1.05])
-    ax.set_xlabel("Recall", fontsize=12)
-    ax.set_ylabel("Precision", fontsize=12)
-    ax.set_title("Precision-Recall Curve — CSI Fall Detection", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Recall (Fall)", fontsize=12)
+    ax.set_ylabel("Precision (Fall)", fontsize=12)
+    ax.set_title("Precision-Recall Curve — CSI Fall Detection (positive = Fall)", fontsize=14, fontweight="bold")
     ax.legend(loc="lower left", fontsize=11)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info("PR curve saved to %s (AUC: %.4f)", save_path, pr_auc)
+    logger.info("PR curve saved to %s (Fall PR AUC: %.4f)", save_path, pr_auc)
 
     return pr_auc
 
@@ -277,6 +282,9 @@ def run_evaluation(
     lstm_layers = model_config.get("lstm_layers", 2)
     lstm_dropout = model_config.get("lstm_dropout", 0.3)
     attention_heads = model_config.get("attention_heads", 4)
+    cnn_filters = model_config.get("cnn_filters", [64, 128])
+    kernel_size = model_config.get("kernel_size", 3)
+    fc_hidden = model_config.get("fc_hidden", 64)
 
     logger.info("Model config: %s", model_config)
 
@@ -288,6 +296,9 @@ def run_evaluation(
         lstm_layers=lstm_layers,
         lstm_dropout=lstm_dropout,
         attention_heads=attention_heads,
+        cnn_filters=cnn_filters,
+        kernel_size=kernel_size,
+        fc_hidden=fc_hidden,
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -315,16 +326,19 @@ def run_evaluation(
     # --- Metrics ---
     accuracy = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred, average="weighted")
+    fall_f1 = f1_score(y_true, y_pred, pos_label=0, average="binary", zero_division=0)
     report_str = classification_report(
         y_true, y_pred,
         target_names=CLASS_NAMES,
         digits=4,
+        zero_division=0,
     )
     report_dict = classification_report(
         y_true, y_pred,
         target_names=CLASS_NAMES,
         digits=4,
         output_dict=True,
+        zero_division=0,
     )
 
     logger.info("\n%s", "=" * 60)
@@ -333,16 +347,26 @@ def run_evaluation(
     logger.info("\n%s", report_str)
     logger.info("Overall Accuracy: %.4f", accuracy)
     logger.info("Weighted F1:      %.4f", f1)
+    logger.info("Fall-class F1:    %.4f", fall_f1)
 
-    # --- Generate plots ---
-    plot_confusion_matrix(y_true, y_pred, eval_dir / "confusion_matrix.png")
-    roc_auc_val = plot_roc_curve(y_true, y_probs, eval_dir / "roc_curve.png")
-    pr_auc_val = plot_precision_recall_curve(y_true, y_probs, eval_dir / "pr_curve.png")
+    # --- Generate plots (require both classes in the test set) ---
+    if len(np.unique(y_true)) < 2:
+        logger.warning(
+            "Test set contains a single class (%d) — ROC/PR curves are undefined; skipping them.",
+            int(y_true[0]),
+        )
+        roc_auc_val = float("nan")
+        pr_auc_val = float("nan")
+    else:
+        plot_confusion_matrix(y_true, y_pred, eval_dir / "confusion_matrix.png")
+        roc_auc_val = plot_roc_curve(y_true, y_probs, eval_dir / "roc_curve.png")
+        pr_auc_val = plot_precision_recall_curve(y_true, y_probs, eval_dir / "pr_curve.png")
 
     # --- Compile results ---
     results: Dict[str, Any] = {
         "accuracy": float(accuracy),
         "f1_weighted": float(f1),
+        "f1_fall": float(fall_f1),
         "roc_auc": float(roc_auc_val),
         "pr_auc": float(pr_auc_val),
         "classification_report": report_dict,
@@ -409,10 +433,10 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
     )
 
-    logger.info("─" * 60)
+    logger.info("-" * 60)
     logger.info("EVALUATION COMPLETE")
     logger.info("  Accuracy:   %.4f", results["accuracy"])
     logger.info("  F1 (wt):    %.4f", results["f1_weighted"])
     logger.info("  ROC AUC:    %.4f", results["roc_auc"])
     logger.info("  PR AUC:     %.4f", results["pr_auc"])
-    logger.info("─" * 60)
+    logger.info("-" * 60)

@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 logger = logging.getLogger(__name__)
@@ -226,16 +226,24 @@ def create_dataloaders(
     num_workers: int = 0,
     random_state: int = 42,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, torch.Tensor]:
-    """Create stratified train/validation/test DataLoaders.
+    """Create group-aware stratified train/validation/test DataLoaders.
 
-    Performs a two-stage stratified split:
-      1. Split off test set.
-      2. Split remaining into train and validation sets.
+    When ``groups.npy`` (recording id per window, written by
+    ``scripts/preprocess.py``) is present, the splits use
+    ``GroupShuffleSplit`` so that overlapping windows that originate from the
+    *same recording* never span train/val/test — this is what prevents
+    leakage between the heavily-overlapped windows of one clip.
 
-    Training DataLoader uses weighted random sampling for class balance.
+    Split strategy:
+      1. Split off the test set by recording (GroupShuffleSplit).
+      2. Split the remainder into train / validation by recording.
+      3. Training DataLoader uses weighted random sampling for class balance.
+
+    Falls back to a window-level stratified split (with a loud warning) only
+    when ``groups.npy`` is missing.
 
     Args:
-        data_dir: Path to directory containing X.npy and y.npy.
+        data_dir: Path to directory containing X.npy, y.npy, groups.npy.
         batch_size: Batch size for all loaders.
         val_ratio: Fraction of data for validation.
         test_ratio: Fraction of data for testing.
@@ -251,26 +259,70 @@ def create_dataloaders(
     X = np.load(str(data_path / "X.npy"))
     y = np.load(str(data_path / "y.npy"))
 
+    groups_path = data_path / "groups.npy"
+    if groups_path.exists():
+        groups = np.load(str(groups_path))
+        n_rec = len(np.unique(groups))
+        logger.info("Group-aware split enabled: %d recordings, %d windows", n_rec, len(y))
+    else:
+        groups = None
+        logger.warning(
+            "groups.npy not found in %s — falling back to WINDOW-LEVEL split. "
+            "Overlapping windows from the same recording can leak between "
+            "train/test and inflate metrics. Re-run scripts/preprocess.py.",
+            data_path,
+        )
+
     logger.info("Total samples: %d, shape: %s", len(y), X.shape)
 
-    # --- Stage 1: Split off test set ---
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y,
-        test_size=test_ratio,
-        stratify=y,
-        random_state=random_state,
-    )
+    # --- Stage 1: Split off the test set ---
+    if groups is not None:
+        gss_test = GroupShuffleSplit(
+            n_splits=1, test_size=test_ratio, random_state=random_state
+        )
+        train_val_idx, test_idx = next(gss_test.split(X, y, groups=groups))
+        X_temp, y_temp = X[train_val_idx], y[train_val_idx]
+        X_test, y_test = X[test_idx], y[test_idx]
+        groups_temp = groups[train_val_idx]
+        logger.info(
+            "Test split: %d recordings (%d windows) held out",
+            len(np.unique(groups[test_idx])), len(test_idx),
+        )
+    else:
+        X_temp, X_test, y_temp, y_test = train_test_split(
+            X, y,
+            test_size=test_ratio,
+            stratify=y,
+            random_state=random_state,
+        )
+        groups_temp = None
 
     # --- Stage 2: Split remaining into train / val ---
     val_fraction = val_ratio / (1.0 - test_ratio)
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp,
-        test_size=val_fraction,
-        stratify=y_temp,
-        random_state=random_state,
-    )
+    if groups is not None:
+        gss_val = GroupShuffleSplit(
+            n_splits=1, test_size=val_fraction, random_state=random_state
+        )
+        train_idx, val_idx = next(gss_val.split(X_temp, y_temp, groups=groups_temp))
+        X_train, y_train = X_temp[train_idx], y_temp[train_idx]
+        X_val, y_val = X_temp[val_idx], y_temp[val_idx]
+    else:
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_temp, y_temp,
+            test_size=val_fraction,
+            stratify=y_temp,
+            random_state=random_state,
+        )
 
     logger.info("Split sizes — Train: %d, Val: %d, Test: %d", len(y_train), len(y_val), len(y_test))
+    if groups is not None:
+        for name, (gy, label) in {
+            "Train": (y_train, ""), "Val": (y_val, ""), "Test": (y_test, ""),
+        }.items():
+            logger.info(
+                "  %s: fall=%d daily=%d", name,
+                int((gy == 0).sum()), int((gy == 1).sum()),
+            )
 
     # --- Build datasets ---
     train_dataset = CSIFallDataset(X_train, y_train, augment=augment, augment_config=augment_config)

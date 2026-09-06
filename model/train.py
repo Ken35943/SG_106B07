@@ -235,12 +235,27 @@ def train(
     """
     # --- Resolve data directory ---
     if data_dir is None:
-        data_dir = config.get("data", {}).get("processed_dir", "data/processed")
+        data_dir = (
+            config.get("paths", {}).get("data_processed")
+            or config.get("data", {}).get("processed_dir", "data/processed")
+        )
+    # Ensure relative paths resolve relative to project root
+    data_dir_path = Path(data_dir)
+    if not data_dir_path.is_absolute() and not data_dir_path.exists():
+        script_dir = Path(__file__).resolve().parent
+        candidate = script_dir.parent / data_dir
+        if candidate.exists():
+            data_dir = str(candidate)
     logger.info("Data directory: %s", data_dir)
 
     # --- Resolve output directory ---
     script_dir = Path(__file__).resolve().parent
-    save_dir = script_dir / "saved"
+    save_dir_cfg = config.get("paths", {}).get("model_saved")
+    if save_dir_cfg:
+        candidate_save = Path(save_dir_cfg)
+        save_dir = candidate_save if candidate_save.is_absolute() else (script_dir.parent / save_dir_cfg)
+    else:
+        save_dir = script_dir / "saved"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Device ---
@@ -251,16 +266,24 @@ def train(
 
     # --- Model hyperparameters from config ---
     model_cfg = config.get("model", {})
-    input_features = model_cfg.get("input_features", 20)
+    train_cfg = config.get("training", {})
+
+    input_features = (
+        model_cfg.get("input_features")
+        or model_cfg.get("pca_components")
+        or config.get("preprocessing", {}).get("pca_components", 20)
+    )
     num_classes = model_cfg.get("num_classes", 2)
     lstm_hidden = model_cfg.get("lstm_hidden", 128)
     lstm_layers = model_cfg.get("lstm_layers", 2)
     lstm_dropout = model_cfg.get("lstm_dropout", 0.3)
     attention_heads = model_cfg.get("attention_heads", 4)
+    cnn_filters = model_cfg.get("cnn_filters", [64, 128])
+    kernel_size = model_cfg.get("kernel_size", 3)
+    fc_hidden = model_cfg.get("fc_hidden", 64)
 
-    # --- Training hyperparameters from config (CLI args override) ---
-    train_cfg = config.get("training", {})
-    patience = train_cfg.get("early_stopping_patience", 15)
+    # --- Training hyperparameters from config (CLI args override if given) ---
+    patience = train_cfg.get("early_stopping_patience") or model_cfg.get("early_stopping_patience", 15)
     weight_decay = train_cfg.get("weight_decay", 1e-4)
     scheduler_patience = train_cfg.get("scheduler_patience", 7)
     scheduler_factor = train_cfg.get("scheduler_factor", 0.5)
@@ -271,7 +294,7 @@ def train(
         data_dir=data_dir,
         batch_size=batch_size,
         augment=True,
-        num_workers=config.get("training", {}).get("num_workers", 0),
+        num_workers=train_cfg.get("num_workers", 0),
     )
 
     # --- Model ---
@@ -282,6 +305,9 @@ def train(
         lstm_layers=lstm_layers,
         lstm_dropout=lstm_dropout,
         attention_heads=attention_heads,
+        cnn_filters=cnn_filters,
+        kernel_size=kernel_size,
+        fc_hidden=fc_hidden,
     ).to(device)
 
     logger.info("\n%s", get_model_summary(model, input_features=input_features))
@@ -301,7 +327,6 @@ def train(
         mode="min",
         factor=scheduler_factor,
         patience=scheduler_patience,
-        verbose=True,
     )
 
     early_stopping = EarlyStopping(patience=patience, verbose=True)
@@ -322,7 +347,7 @@ def train(
 
     for epoch in range(1, epochs + 1):
         current_lr = optimizer.param_groups[0]["lr"]
-        logger.info("─" * 60)
+        logger.info("-" * 60)
         logger.info("Epoch %d/%d  (lr=%.2e)", epoch, epochs, current_lr)
 
         # Train
@@ -368,11 +393,14 @@ def train(
                     "lstm_layers": lstm_layers,
                     "lstm_dropout": lstm_dropout,
                     "attention_heads": attention_heads,
+                    "cnn_filters": cnn_filters,
+                    "kernel_size": kernel_size,
+                    "fc_hidden": fc_hidden,
                 },
             }
             checkpoint_path = save_dir / "best_model.pth"
             torch.save(checkpoint, str(checkpoint_path))
-            logger.info("  ★ Best model saved (val_loss: %.6f)", val_loss)
+            logger.info("  [BEST] Model saved (val_loss: %.6f)", val_loss)
 
         # Early stopping check
         if early_stopping(val_loss):

@@ -141,30 +141,40 @@ class CSIFallDetector(nn.Module):
         attention_heads: int = 4,
         attention_dropout: float = 0.1,
         cnn_dropout: float = 0.2,
+        cnn_filters: list[int] | tuple[int, ...] = (64, 128),
+        kernel_size: int = 3,
+        fc_hidden: int = 64,
     ) -> None:
         super().__init__()
 
         self.input_features = input_features
         self.num_classes = num_classes
         self.lstm_hidden = lstm_hidden
+        self.cnn_filters = list(cnn_filters)
+        self.kernel_size = kernel_size
+        self.fc_hidden = fc_hidden
 
-        # --- Conv1D Block 1: 64 filters, k=3, ReLU, BatchNorm ---
+        c1_out = self.cnn_filters[0] if len(self.cnn_filters) > 0 else 64
+        c2_out = self.cnn_filters[1] if len(self.cnn_filters) > 1 else 128
+        padding = kernel_size // 2
+
+        # --- Conv1D Block 1: c1_out filters, kernel_size, ReLU, BatchNorm ---
         self.conv1 = nn.Conv1d(
             in_channels=input_features,
-            out_channels=64,
-            kernel_size=3,
-            padding=1,  # same padding
+            out_channels=c1_out,
+            kernel_size=kernel_size,
+            padding=padding,
         )
-        self.bn1 = nn.BatchNorm1d(64)
+        self.bn1 = nn.BatchNorm1d(c1_out)
 
-        # --- Conv1D Block 2: 128 filters, k=3, ReLU, BatchNorm, MaxPool ---
+        # --- Conv1D Block 2: c2_out filters, kernel_size, ReLU, BatchNorm, MaxPool ---
         self.conv2 = nn.Conv1d(
-            in_channels=64,
-            out_channels=128,
-            kernel_size=3,
-            padding=1,
+            in_channels=c1_out,
+            out_channels=c2_out,
+            kernel_size=kernel_size,
+            padding=padding,
         )
-        self.bn2 = nn.BatchNorm1d(128)
+        self.bn2 = nn.BatchNorm1d(c2_out)
         self.pool = nn.MaxPool1d(kernel_size=2)
 
         # --- Dropout after CNN ---
@@ -172,7 +182,7 @@ class CSIFallDetector(nn.Module):
 
         # --- Bidirectional LSTM ---
         self.lstm = nn.LSTM(
-            input_size=128,
+            input_size=c2_out,
             hidden_size=lstm_hidden,
             num_layers=lstm_layers,
             batch_first=True,
@@ -191,9 +201,9 @@ class CSIFallDetector(nn.Module):
         )
 
         # --- Fully connected classifier ---
-        self.fc1 = nn.Linear(lstm_out_dim, 64)
+        self.fc1 = nn.Linear(lstm_out_dim, fc_hidden)
         self.fc_dropout = nn.Dropout(0.3)
-        self.fc2 = nn.Linear(64, num_classes)
+        self.fc2 = nn.Linear(fc_hidden, num_classes)
 
         # Weight initialization
         self._init_weights()

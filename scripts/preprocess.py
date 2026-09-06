@@ -10,27 +10,49 @@ ready for model training.
 
 Pipeline stages
 ---------------
-1. **Hampel filter** — outlier removal per subcarrier.
-2. **Butterworth low-pass filter** — noise suppression.
-3. **PCA** — dimensionality reduction across subcarriers.
-4. **Sliding-window segmentation** — fixed-length windows with overlap.
-5. **Normalisation** — z-score or min-max per feature.
+0. **Subcarrier selection** — drop the 24 null/guard carriers and the
+   redundant legacy LLTF block (HT40: 190 → 114 occupied HT-LTF carriers).
+1. **Uniform resampling** — packets arrive irregularly (measured 60–65 Hz with
+   10–77 ms jitter); interpolate onto the nominal grid so every window has the
+   same physical duration.
+2. **Log-amplitude** — turns AGC / distance gain differences between sessions
+   into an additive offset that the high-pass removes.
+3. **Hampel filter** — vectorised outlier removal per subcarrier.
+4. **Causal Butterworth band-pass** — removes the static path (< 0.5 Hz) and
+   anti-aliases; *identical* code path to the real-time detector.
+5. **PCA** — dimensionality reduction across subcarriers.
+6. **Sliding-window segmentation** — fixed-length windows with overlap;
+   every window carries its recording id (``groups.npy``) so the train/test
+   split can be done per recording and not per overlapping window.
+7. **Normalisation** — z-score or min-max per feature.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import pickle
+import sys
 from pathlib import Path
 from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
 import yaml
-from scipy.signal import butter, filtfilt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from csi_dsp import (  # noqa: E402
+    CausalSOSFilter,
+    design_bandpass_sos,
+    estimate_sample_rate,
+    hampel_filter as _hampel_vectorised,
+    resample_uniform,
+    select_subcarriers,
+    timestamps_to_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,92 +68,30 @@ def hampel_filter(
     window_size: int = 5,
     threshold: float = 3.0,
 ) -> np.ndarray:
-    """Apply a Hampel filter along axis-0 of *data* (samples × features).
+    """Hampel outlier filter along axis-0 of *data* ``(n_samples, n_features)``.
 
-    Replaces outliers (points that deviate from the local median by more
-    than *threshold* × MAD) with the local median.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        2-D array of shape ``(n_samples, n_features)``.
-    window_size : int
-        Half-window size for the rolling median / MAD.
-    threshold : float
-        Number of MADs beyond which a sample is flagged.
-
-    Returns
-    -------
-    np.ndarray
-        Filtered copy of *data* with same shape.
+    Thin wrapper over the vectorised implementation in :mod:`csi_dsp`
+    (kept for API compatibility; ~100× faster than the former Python loop).
     """
-    filtered = data.copy()
-    n_samples, n_features = data.shape
-    k = 1.4826  # consistency constant for Gaussian distribution
-
-    for col in range(n_features):
-        series = data[:, col]
-        for i in range(n_samples):
-            lo = max(0, i - window_size)
-            hi = min(n_samples, i + window_size + 1)
-            window = series[lo:hi]
-            median = np.median(window)
-            mad = k * np.median(np.abs(window - median))
-            if mad == 0:
-                continue
-            if np.abs(series[i] - median) > threshold * mad:
-                filtered[i, col] = median
-
-    return filtered
+    return _hampel_vectorised(data, half_window=window_size, n_sigmas=threshold)
 
 
-def butterworth_lowpass(
+def causal_bandpass(
     data: np.ndarray,
-    cutoff: float = 30.0,
-    sample_rate: float = 100.0,
+    low_hz: float,
+    high_hz: float,
+    sample_rate: float,
     order: int = 4,
 ) -> np.ndarray:
-    """Apply a Butterworth low-pass filter column-wise.
+    """Causal, stateful Butterworth band-pass (see :class:`csi_dsp.CausalSOSFilter`).
 
-    Parameters
-    ----------
-    data : np.ndarray
-        ``(n_samples, n_features)``
-    cutoff : float
-        Cut-off frequency in Hz.
-    sample_rate : float
-        Sampling rate in Hz.
-    order : int
-        Filter order.
-
-    Returns
-    -------
-    np.ndarray
-        Filtered data, same shape.
+    Using the *same* causal filter offline and online guarantees that the
+    training distribution matches what the detector sees at run time; the
+    previous ``filtfilt`` (zero-phase, non-causal) could never be reproduced
+    on a live stream.
     """
-    nyquist = sample_rate / 2.0
-    normalised_cutoff = cutoff / nyquist
-    if normalised_cutoff >= 1.0:
-        logger.warning(
-            "Cutoff (%.1f Hz) ≥ Nyquist (%.1f Hz); skipping Butterworth filter",
-            cutoff,
-            nyquist,
-        )
-        return data
-
-    b, a = butter(order, normalised_cutoff, btype="low")
-
-    # filtfilt needs ≥ 3×padlen samples; fall back to raw if too short.
-    padlen = 3 * max(len(a), len(b))
-    if data.shape[0] <= padlen:
-        logger.warning(
-            "Signal too short (%d) for filter padlen (%d); returning raw data",
-            data.shape[0],
-            padlen,
-        )
-        return data
-
-    return filtfilt(b, a, data, axis=0).astype(data.dtype)
+    sos = design_bandpass_sos(sample_rate, low_hz, high_hz, order)
+    return CausalSOSFilter(sos).process(data)
 
 
 def apply_pca(
@@ -275,9 +235,13 @@ class PreprocessingPipeline:
         pp = config["preprocessing"]
         self.hampel_window: int = pp["hampel_window"]
         self.hampel_threshold: float = pp["hampel_threshold"]
-        self.butterworth_cutoff: float = pp["butterworth_cutoff"]
-        self.butterworth_order: int = pp["butterworth_order"]
-        self.sample_rate: float = config["csi"]["sample_rate"]
+        self.bandpass_low: float = float(pp.get("bandpass_low_hz", 0.5))
+        self.bandpass_high: float = float(pp.get("bandpass_high_hz", 40.0))
+        self.bandpass_order: int = int(pp.get("bandpass_order", 4))
+        self.log_amplitude: bool = bool(pp.get("log_amplitude", True))
+        self.resample: bool = bool(pp.get("resample_to_uniform", True))
+        self.min_rate_ratio: float = float(pp.get("min_rate_ratio", 0.5))
+        self.sample_rate: float = float(config["csi"]["sample_rate"])
         self.pca_components: int = pp["pca_components"]
         self.window_size: int = pp["window_size"]
         self.window_overlap: float = pp["window_overlap"]
@@ -286,9 +250,28 @@ class PreprocessingPipeline:
         # Fitted transformers (populated after fit_transform)
         self.pca_model: Optional[PCA] = None
         self.scaler: Optional[StandardScaler | MinMaxScaler] = None
+        self.subcarrier_cols: Optional[np.ndarray] = None   # occupied carriers
+        self.subcarrier_k: Optional[np.ndarray] = None      # physical indices
+        self.n_raw_subcarriers: Optional[int] = None
 
         # Label mapping from config
         self._label_map = self._build_label_map(config)
+
+    # ── Per-recording signal chain (shared with realtime via csi_dsp) ────
+
+    def filter_recording(self, amp: np.ndarray) -> np.ndarray:
+        """Log-amp → Hampel → causal band-pass on an occupied-carrier matrix
+        (T, F) that is already on a uniform time grid."""
+        if self.log_amplitude:
+            amp = 20.0 * np.log10(amp + 1.0)
+        amp = hampel_filter(amp, window_size=self.hampel_window, threshold=self.hampel_threshold)
+        return causal_bandpass(
+            amp,
+            low_hz=self.bandpass_low,
+            high_hz=self.bandpass_high,
+            sample_rate=self.sample_rate,
+            order=self.bandpass_order,
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -302,18 +285,66 @@ class PreprocessingPipeline:
                 lm[act] = label
         return lm
 
-    def _load_csv(self, path: Path) -> np.ndarray:
-        """Load a raw CSV and return the amplitude columns as a 2-D array."""
+    def _load_csv(self, path: Path) -> tuple[np.ndarray, np.ndarray]:
+        """Load a raw CSV → ``(t_seconds, amplitude)`` with amplitude (T, F_raw)."""
         df = pd.read_csv(path)
         amp_cols = [c for c in df.columns if c.startswith("amplitude_")]
         if not amp_cols:
             raise ValueError(f"No amplitude columns found in {path}")
-        return df[amp_cols].values.astype(np.float64)
+        amp = df[amp_cols].values.astype(np.float64)
+        if "timestamp" in df.columns:
+            t = timestamps_to_seconds(df["timestamp"].values.astype(np.float64))
+        else:
+            t = np.arange(len(df)) / self.sample_rate
+        return t, amp
+
+    def _select_subcarriers(self, amp: np.ndarray) -> np.ndarray:
+        """Lock the occupied-carrier column set on first use, then apply it."""
+        if self.subcarrier_cols is None:
+            cols, k = select_subcarriers(amp)
+            self.subcarrier_cols, self.subcarrier_k = cols, k
+            self.n_raw_subcarriers = amp.shape[1]
+            logger.info(
+                "Subcarrier selection: %d raw entries → %d occupied carriers%s",
+                amp.shape[1], len(cols),
+                " (verified ESP32-S3 HT40 HT-LTF map)" if k is not None else " (data-driven mask)",
+            )
+        if amp.shape[1] != self.n_raw_subcarriers:
+            raise ValueError(
+                f"Subcarrier count {amp.shape[1]} differs from pipeline's {self.n_raw_subcarriers}"
+            )
+        return amp[:, self.subcarrier_cols]
+
+    def prepare_recording(self, t_sec: np.ndarray, amp_raw: np.ndarray, name: str = "") -> Optional[np.ndarray]:
+        """Raw CSV arrays → filtered occupied-carrier matrix on a uniform grid.
+
+        Returns ``None`` (and logs why) when the recording is unusable."""
+        amp = self._select_subcarriers(amp_raw)
+        fs_meas = estimate_sample_rate(t_sec)
+        if not np.isfinite(fs_meas) or fs_meas < self.min_rate_ratio * self.sample_rate:
+            logger.warning(
+                "%s: measured packet rate %.1f Hz < %.0f%% of nominal %.0f Hz — skipping",
+                name, fs_meas, 100 * self.min_rate_ratio, self.sample_rate,
+            )
+            return None
+        if fs_meas < 0.9 * self.sample_rate:
+            logger.warning(
+                "%s: measured %.1f Hz (nominal %.0f Hz) — content above %.0f Hz is NOT recoverable",
+                name, fs_meas, self.sample_rate, fs_meas / 2,
+            )
+        if self.resample:
+            _, amp = resample_uniform(t_sec, amp, self.sample_rate)
+        return self.filter_recording(amp)
 
     # ── Core API ─────────────────────────────────────────────────────────
 
-    def fit_transform(self, raw_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-        """Read all raw CSVs, run the full pipeline, and return ``(X, y)``.
+    def fit_transform(self, raw_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+        """Read all raw CSVs, run the full pipeline, and return
+        ``(X, y, groups, group_names)``.
+
+        Collects and filters data across all activity files, fits a global PCA
+        across the entire pooled dataset (eliminating file-ordering bias),
+        transforms each recording, and segments into sliding windows.
 
         Parameters
         ----------
@@ -326,9 +357,15 @@ class PreprocessingPipeline:
             ``(n_windows, window_size, n_pca_components)``
         y : np.ndarray
             ``(n_windows,)`` integer labels.
+        groups : np.ndarray
+            ``(n_windows,)`` integer recording id of every window — REQUIRED by
+            ``model/dataset.py`` to split by recording and avoid leakage
+            between overlapping windows of the same clip.
+        group_names : list[str]
+            ``group_names[g]`` is the source file of recording ``g``.
         """
-        all_windows: list[np.ndarray] = []
-        all_labels: list[int] = []
+        # Phase 1: Load and filter all files
+        file_entries: list[tuple[np.ndarray, int, str]] = []
 
         for activity_dir in sorted(raw_dir.iterdir()):
             if not activity_dir.is_dir():
@@ -349,56 +386,71 @@ class PreprocessingPipeline:
 
             for csv_path in csv_files:
                 try:
-                    amp = self._load_csv(csv_path)
+                    t_sec, amp_raw = self._load_csv(csv_path)
+                    amp = self.prepare_recording(t_sec, amp_raw, name=csv_path.name)
                 except Exception as exc:
                     logger.error("Failed to load %s: %s", csv_path, exc)
                     continue
 
+                if amp is None:
+                    continue
+
                 if amp.shape[0] < self.window_size:
                     logger.warning(
-                        "File %s too short (%d rows) — skipping",
+                        "File %s too short (%d rows after resampling) — skipping",
                         csv_path.name,
                         amp.shape[0],
                     )
                     continue
 
-                # 1. Hampel
-                amp = hampel_filter(
-                    amp,
-                    window_size=self.hampel_window,
-                    threshold=self.hampel_threshold,
-                )
+                file_entries.append((amp, label, f"{activity}/{csv_path.name}"))
 
-                # 2. Butterworth
-                amp = butterworth_lowpass(
-                    amp,
-                    cutoff=self.butterworth_cutoff,
-                    sample_rate=self.sample_rate,
-                    order=self.butterworth_order,
-                )
+        if not file_entries:
+            raise RuntimeError(f"No valid data produced — check {raw_dir}")
 
-                # 3. PCA — fit on first file, transform on rest
-                amp, self.pca_model = apply_pca(
-                    amp,
-                    n_components=self.pca_components,
-                    pca_model=self.pca_model,
-                )
+        # Phase 2: Fit global PCA across all pooled samples if not pre-loaded
+        if self.pca_model is None:
+            all_filtered = np.concatenate([amp for amp, _, _ in file_entries], axis=0)
+            n_comp = min(self.pca_components, all_filtered.shape[1], all_filtered.shape[0])
+            self.pca_model = PCA(n_components=n_comp)
+            self.pca_model.fit(all_filtered)
+            explained = self.pca_model.explained_variance_ratio_.sum()
+            logger.info(
+                "Global PCA fitted across %d samples: %d → %d components (%.1f%% variance explained)",
+                all_filtered.shape[0],
+                all_filtered.shape[1],
+                n_comp,
+                explained * 100,
+            )
 
-                # 4. Sliding window
-                windows = segment_sliding_window(
-                    amp,
-                    window_size=self.window_size,
-                    overlap=self.window_overlap,
-                )
+        # Phase 3: Transform with PCA, segment into sliding windows
+        all_windows: list[np.ndarray] = []
+        all_labels: list[int] = []
+        all_groups: list[int] = []
+        group_names: list[str] = []
 
-                if windows.shape[0] == 0:
-                    continue
+        for amp, label, fname in file_entries:
+            # 3. PCA transform
+            amp_pca = self.pca_model.transform(amp)
 
-                all_windows.append(windows)
-                all_labels.extend([label] * windows.shape[0])
+            # 4. Sliding window segmentation
+            windows = segment_sliding_window(
+                amp_pca,
+                window_size=self.window_size,
+                overlap=self.window_overlap,
+            )
+
+            if windows.shape[0] == 0:
+                continue
+
+            group_id = len(group_names)
+            group_names.append(fname)
+            all_windows.append(windows)
+            all_labels.extend([label] * windows.shape[0])
+            all_groups.extend([group_id] * windows.shape[0])
 
         if not all_windows:
-            raise RuntimeError("No valid data produced — check data/raw/")
+            raise RuntimeError("No valid windows generated after segmentation.")
 
         X = np.concatenate(all_windows, axis=0)
 
@@ -406,28 +458,45 @@ class PreprocessingPipeline:
         X, self.scaler = normalize(X, method=self.norm_method)
 
         y = np.array(all_labels, dtype=np.int64)
-        logger.info("Pipeline complete — X.shape=%s  y.shape=%s", X.shape, y.shape)
-        return X, y
+        groups = np.array(all_groups, dtype=np.int64)
+        logger.info(
+            "Pipeline complete — X.shape=%s  y.shape=%s  recordings=%d",
+            X.shape, y.shape, len(group_names),
+        )
+        return X, y, groups, group_names
 
     # ── Persistence ──────────────────────────────────────────────────────
 
     def save(self, path: Path) -> None:
-        """Persist the fitted PCA + scaler to *path*."""
+        """Persist everything the real-time detector needs to reproduce the
+        exact training transform."""
         path.parent.mkdir(parents=True, exist_ok=True)
         state = {
             "pca_model": self.pca_model,
             "scaler": self.scaler,
+            "subcarrier_cols": self.subcarrier_cols,
+            "subcarrier_k": self.subcarrier_k,
+            "n_raw_subcarriers": self.n_raw_subcarriers,
+            "sample_rate": self.sample_rate,
+            "log_amplitude": self.log_amplitude,
+            "hampel_window": self.hampel_window,
+            "hampel_threshold": self.hampel_threshold,
+            "bandpass": (self.bandpass_low, self.bandpass_high, self.bandpass_order),
+            "window_size": self.window_size,
         }
         with open(path, "wb") as fh:
             pickle.dump(state, fh)
         logger.info("Pipeline state saved → %s", path)
 
     def load(self, path: Path) -> None:
-        """Restore fitted PCA + scaler from *path*."""
+        """Restore fitted state from *path*."""
         with open(path, "rb") as fh:
             state = pickle.load(fh)  # noqa: S301
         self.pca_model = state["pca_model"]
         self.scaler = state["scaler"]
+        self.subcarrier_cols = state.get("subcarrier_cols")
+        self.subcarrier_k = state.get("subcarrier_k")
+        self.n_raw_subcarriers = state.get("n_raw_subcarriers")
         logger.info("Pipeline state loaded ← %s", path)
 
 
@@ -473,11 +542,17 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pipeline = PreprocessingPipeline(config)
-    X, y = pipeline.fit_transform(raw_dir)
+    X, y, groups, group_names = pipeline.fit_transform(raw_dir)
 
     np.save(out_dir / "X.npy", X)
     np.save(out_dir / "y.npy", y)
-    logger.info("Saved X.npy (%s) and y.npy (%s) → %s", X.shape, y.shape, out_dir)
+    np.save(out_dir / "groups.npy", groups)
+    with open(out_dir / "groups.json", "w", encoding="utf-8") as fh:
+        json.dump({str(i): name for i, name in enumerate(group_names)}, fh, indent=2)
+    logger.info(
+        "Saved X.npy %s, y.npy %s, groups.npy (%d recordings) → %s",
+        X.shape, y.shape, len(group_names), out_dir,
+    )
 
     pipeline.save(out_dir / "pipeline_state.pkl")
     logger.info("All done ✓")
