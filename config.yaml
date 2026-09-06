@@ -8,8 +8,8 @@
 # ── Hardware ─────────────────────────────────────────────────────────────────
 hardware:
   sender:
-    port: "COM5"                  # ESP32-S3 with normal PCB antenna
-    description: "CSI sender (PCB antenna)"
+    port: "COM5"                  # ESP32-S3 with 6 dBi external antenna
+    description: "CSI sender (6 dBi external antenna)"
   receiver:
     port: "COM3"                  # ESP32-S3 with 6 dBi external antenna
     description: "CSI receiver (6 dBi external antenna)"

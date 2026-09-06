@@ -24,14 +24,14 @@ High-precision, privacy-preserving elderly fall detection using WiFi Channel Sta
 | Board | Port | Antenna | Role | Firmware |
 |:---|:---|:---|:---|:---|
 | ESP32-S3 #1 | **COM3** | 6 dBi External Antenna | **CSI Receiver (Rx)** | `esp-csi/examples/get-started/csi_recv` |
-| ESP32-S3 #2 | **COM5** | Onboard PCB Antenna | **CSI Sender (Tx)** | `esp-csi/examples/get-started/csi_send` |
+| ESP32-S3 #2 | **COM5** | 6 dBi External Antenna | **CSI Sender (Tx)** | `esp-csi/examples/get-started/csi_send` |
 
 ### Room Layout
 ```text
     [COM5 - Sender]                   Activity Zone                  [COM3 - Receiver]
     ┌─────────────┐                                                  ┌─────────────┐
     │  ESP32-S3   │◄─────────────────── 3–5 m ──────────────────────►│  ESP32-S3   │
-    │ PCB Antenna │           Person moves or rests here             │ 6dBi Antenna│
+    │ 6dBi Antenna│           Person moves or rests here             │ 6dBi Antenna│
     └─────────────┘                                                  └─────────────┘
     Height: ~1.0 m                                                   Height: ~1.0 m
 ```
