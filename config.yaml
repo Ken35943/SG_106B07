@@ -23,9 +23,7 @@ wifi:
 
 # ── CSI Parameters ───────────────────────────────────────────────────────────
 csi:
-  sample_rate: 50                 # Target packets / second (= CONFIG_SEND_FREQUENCY
-                                  # in csi_send firmware; 50 Hz × ~1.7 kB = 85 kB/s
-                                  # fits under the 92.16 kB/s @921600 baud ceiling)
+  sample_rate: 100                # Target packets / second
   sample_duration: 10             # Seconds per recording
   num_subcarriers: 190            # Number of OFDM subcarriers in HT40 mode (~190 usable)
   bandwidth: 40                   # MHz (ESP32-S3 HT40 mode)
@@ -44,11 +42,10 @@ data:
 # ── Preprocessing ────────────────────────────────────────────────────────────
 preprocessing:
   # Timing: interpolate irregular packet arrivals onto the nominal csi.sample_rate
-  # grid so every window has the same physical duration. At 50 Hz Tx the link
-  # is no longer oversubscribed, so arrivals should be near-lossless (~50 Hz,
-  # low jitter); the resampler then only corrects USB-burst unevenness.
+  # grid so every window has the same physical duration (measured raw rate on
+  # the current firmware is only 60-65 Hz with 10-77 ms jitter).
   resample_to_uniform: true
-  min_rate_ratio: 0.6             # Skip recordings whose measured rate < 60% of nominal (30 Hz @50 Hz grid)
+  min_rate_ratio: 0.5             # Skip recordings whose measured rate < 50% of nominal
 
   # Log-amplitude (20*log10) turns AGC/distance gain differences between
   # sessions into an additive offset that the band-pass removes.
@@ -63,13 +60,8 @@ preprocessing:
   # Fall Doppler on a 2.4 GHz bistatic link: f_D = (v/λ)(cosθt+cosθr) ≤ 2v/λ
   # ≈ 16 Hz per m/s → torso at 2-3 m/s lands at 30-49 Hz.  A 10 Hz low-pass
   # (previous setting) removed the entire fall transient.
-  # NOTE @50 Hz sampling (Nyquist 25 Hz): the 40 Hz setting auto-clamps to
-  # 0.45*fs = 22.5 Hz. Torso Doppler above 25 Hz folds back (aliased) but
-  # still registers as transient energy; the classifier uses the ≤10 Hz
-  # motion ENVELOPE, which is unaffected. True Doppler velocimetry above
-  # 25 Hz is not available at this rate — accepted trade-off for lossless TX.
   bandpass_low_hz: 0.5
-  bandpass_high_hz: 40            # clamped to 0.45*fs automatically (22.5 Hz @50 Hz)
+  bandpass_high_hz: 40            # clamped to 0.45*fs automatically if fs is lower
   bandpass_order: 4               # per edge (8th-order overall, 4 biquads)
 
   # PCA dimensionality reduction
@@ -78,9 +70,7 @@ preprocessing:
   # Sliding-window segmentation.  NOTE: overlapping windows from one recording
   # share content — the train/val/test split MUST be done per recording
   # (groups.npy / GroupShuffleSplit), never per window.
-  # window_size is in SAMPLES: 50 samples @50 Hz = 1.0 s physical window
-  # (was 100 @100 Hz). Model input shape changes → retraining is mandatory.
-  window_size: 50                 # Samples per window
+  window_size: 100                # Samples per window
   window_overlap: 0.5             # Fractional overlap [0, 1)
 
   # Normalisation method: "zscore" | "minmax"
@@ -117,7 +107,7 @@ training:
 
 # ── Real-Time Fall Detection Runtime ─────────────────────────────────────────
 realtime:
-  stride: 12                      # Stride in grid samples between inferences (12 ≈ 240 ms at 50 Hz)
+  stride: 25                      # Stride in packets between inferences (25 pkts = 250ms at 100Hz)
   fall_threshold: 0.80            # Probability threshold to classify a window as fall
   consecutive_windows: 2          # Consecutive positive windows required to confirm alarm
   cooldown_seconds: 5.0           # Cooldown seconds after alert before re-triggering
