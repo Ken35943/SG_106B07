@@ -12,6 +12,13 @@ ZERO-LAG ARCHITECTURE:
   dual_link.DualCSIReader and is used only where alignment is required).
 - GUI refreshes on a precision 60 FPS QTimer; Y-axis auto-expands (0–120)
   so peaks are never clipped, while user zoom still works.
+- FIXED-TIME-BASE RENDERING (anti-judder): packets arrive in USB bursts
+  (0/2/1/3 per 16.6 ms frame), so plotting one step per packet produces
+  variable stride = visible micro-stutter. Instead each stored sample
+  carries its wall-clock arrival time and every GUI tick renders a UNIFORM
+  time grid (default last 3.0 s) via linear interpolation. Scroll speed is
+  therefore constant in pixels/second regardless of arrival bursts; gaps
+  render as truthful flatlines (edge-hold) instead of timeline leaps.
 """
 
 from __future__ import annotations
@@ -81,7 +88,12 @@ class DualVizPump(threading.Thread):
         self.running = True
 
         self.workers: list[LinkWorker] = []
-        self.rings = [RingBuffer(history_len, n_plot), RingBuffer(history_len, n_plot)]
+        # Ring holds n_plot data channels + 1 trailing WALL-CLOCK arrival-time
+        # channel (seconds, monotonic). float64: float32 would quantize large
+        # monotonic timestamps to ~ms steps and break interpolation order.
+        # One snapshot() therefore always returns time-aligned (data, time).
+        self.rings = [RingBuffer(history_len, n_plot + 1, dtype=np.float64),
+                      RingBuffer(history_len, n_plot + 1, dtype=np.float64)]
         self.plot_idx: list[Optional[np.ndarray]] = [None, None]
         self.last_id = [-1, -1]
         self.rate_hz = [0.0, 0.0]
@@ -139,17 +151,23 @@ class DualVizPump(threading.Thread):
             if dt > 0:
                 time.sleep(dt)
 
-    def _feed(self, link: int, pid: int, amp: np.ndarray, gain_ok: bool = True) -> None:
+    def _feed(self, link: int, pid: int, amp: np.ndarray, gain_ok: bool = True,
+              t_wall: Optional[float] = None) -> None:
         if self.plot_idx[link] is None or len(amp) != getattr(self, "_nsub", [None, None])[link]:
             self._nsub = getattr(self, "_nsub", [None, None])
             self._nsub[link] = len(amp)
             self.plot_idx[link] = _select_plot_indices(len(amp))
+        now = t_wall if t_wall is not None else time.monotonic()
         if not gain_ok and self._last_row[link] is not None:
             # Firmware AGC gain-glitch frame: hold the previous row instead
             # of plotting a 200–400% common-mode spike. The spike never
             # enters the ring buffer, so waveforms, autoscale and any
-            # downstream consumer stay clean.
-            self.rings[link].push(self._last_row[link])
+            # downstream consumer stay clean. The held row is stamped with
+            # the CURRENT time so the fixed time base keeps scrolling.
+            row = np.empty(self.n_plot + 1, dtype=np.float64)
+            row[:-1] = self._last_row[link]
+            row[-1] = now
+            self.rings[link].push(row)
             with self._lock:
                 self.glitches[link] += 1
                 self.last_id[link] = pid
@@ -157,9 +175,11 @@ class DualVizPump(threading.Thread):
                 self.has_new[link] = True
             return
         try:
-            row = np.asarray(amp[self.plot_idx[link]], dtype=np.float32)
+            row = np.empty(self.n_plot + 1, dtype=np.float64)
+            row[:-1] = amp[self.plot_idx[link]]
+            row[-1] = now
             self.rings[link].push(row)
-            self._last_row[link] = row
+            self._last_row[link] = row[:-1].copy()
         except Exception:
             return  # length changed mid-stream; re-lock indices next packet
         with self._lock:
@@ -253,6 +273,7 @@ class DualVisualizerWindow(QMainWindow):
         mock: bool = False,
         replay: Optional[tuple[str, str]] = None,
         use_gl: bool = False,
+        span_s: float = 3.0,
     ):
         super().__init__()
         mode = "MOCK" if mock else (f"REPLAY" if replay else f"{ports[0]}|{ports[1]}")
@@ -276,13 +297,18 @@ class DualVisualizerWindow(QMainWindow):
         hdr.addWidget(self.lbl_info)
         layout.addLayout(hdr)
 
+        # Fixed display time base (seconds). The x-axis is wall-clock time
+        # ("seconds ago"), NOT packet index — this is what makes scroll
+        # speed constant regardless of USB burst arrivals.
+        self._span_s = float(span_s)
+        self._xgrid = -self._span_s + (np.arange(_HISTORY_LEN) + 0.5) / _HISTORY_LEN * self._span_s
+
         self.plots, self.curves = [], []
         for k, name in enumerate((f"Receiver 1 ({ports[0]})", f"Receiver 2 ({ports[1]})")):
             plot = pg.PlotWidget(title=f"{name} — Subcarrier Amplitudes")
-            if k == 1:
-                plot.setLabel("bottom", "Time (frames)")
+            plot.setLabel("bottom", "Time (s ago)")
             plot.setLabel("left", "Amplitude")
-            plot.setXRange(0, _HISTORY_LEN, padding=0)
+            plot.setXRange(-self._span_s, 0, padding=0)
             plot.setYRange(0, _Y_MIN_SPAN, padding=0.02)
             plot.showGrid(x=True, y=True, alpha=0.25)
             plot.setMouseEnabled(x=False, y=True)
@@ -325,6 +351,28 @@ class DualVisualizerWindow(QMainWindow):
                 self._ymax[k] = new
                 self.plots[k].setYRange(0, new, padding=0.02)
 
+    def _interp_frame(self, snap: np.ndarray, now: float) -> Optional[np.ndarray]:
+        """Resample one ring snapshot onto the uniform display time grid.
+
+        ``snap`` is (H, n_plot+1) with wall-clock arrival times in the last
+        column (0 = empty slot). Returns (H, n_plot) float32 sampled at
+        ``now - span ... now``, or None if fewer than 2 valid samples exist.
+        np.interp edge-holds outside the data range, so starvation renders
+        as a truthful flatline instead of a timeline leap.
+        """
+        data = snap[:, :-1]
+        t = snap[:, -1]
+        valid = t > 0
+        if int(valid.sum()) < 2:
+            return None
+        grid = now - self._span_s + (np.arange(_HISTORY_LEN) + 0.5) / _HISTORY_LEN * self._span_s
+        tv = t[valid]
+        out = np.empty((_HISTORY_LEN, data.shape[1]), dtype=np.float32)
+        dv = data[valid]
+        for i in range(dv.shape[1]):
+            out[:, i] = np.interp(grid, tv, dv[:, i])
+        return out
+
     def update_ui(self):
         self._frames += 1
         now = time.monotonic()
@@ -334,18 +382,20 @@ class DualVisualizerWindow(QMainWindow):
             self._fps_t0 = now
 
         st = self.pump.stats()
-        d0, n0 = self.pump.snapshot(0)
-        d1, n1 = self.pump.snapshot(1)
-        if not (n0 or n1):
-            return  # nothing new on either link: skip redraw entirely
-
-        self._autoscale(0, d0)
-        self._autoscale(1, d1)
-        for i in range(_NUM_SUBCARRIERS_TO_PLOT):
-            # skipFiniteCheck: data is finite by construction; skips a full
-            # NaN scan per curve per frame.
-            self.curves[0][i].setData(d0[:, i], skipFiniteCheck=True)
-            self.curves[1][i].setData(d1[:, i], skipFiniteCheck=True)
+        # NOTE: deliberately re-render EVERY tick (no has_new early-return).
+        # The time base is anchored to wall-clock `now`, so the trace scrolls
+        # at constant speed even through arrival gaps (flatline), instead of
+        # freezing then leaping. Per-frame cost is ~8×np.interp(200) ≈ 0.2 ms.
+        for k in (0, 1):
+            snap, _new = self.pump.snapshot(k)
+            frame = self._interp_frame(snap, now)
+            if frame is None:
+                continue  # buffer still empty (startup): leave previous paint
+            self._autoscale(k, frame)
+            for i in range(_NUM_SUBCARRIERS_TO_PLOT):
+                # skipFiniteCheck: data is finite by construction; skips a full
+                # NaN scan per curve per frame.
+                self.curves[k][i].setData(self._xgrid, frame[:, i], skipFiniteCheck=True)
 
         if now - self._last_text_t >= 0.25:
             self._last_text_t = now
@@ -373,6 +423,8 @@ def main():
                         help="GPU-accelerated curve rendering (needs PyOpenGL + real display)")
     parser.add_argument("--replay", type=str, default=None,
                         help="One CSV (both links) or two CSVs 'a.csv,b.csv' to replay")
+    parser.add_argument("--span", type=float, default=3.0,
+                        help="Display time-base span in seconds (constant scroll speed)")
     args = parser.parse_args()
 
     port_list = [p.strip() for p in args.ports.split(",")]
@@ -383,7 +435,8 @@ def main():
 
     app = QApplication(sys.argv)
     win = DualVisualizerWindow(ports=(port_list[0], port_list[1]), baud=args.baud,
-                               mock=args.mock, replay=replay, use_gl=args.gl)
+                               mock=args.mock, replay=replay, use_gl=args.gl,
+                               span_s=args.span)
     win.show()
     sys.exit(app.exec())
 
