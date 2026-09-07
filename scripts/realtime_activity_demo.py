@@ -47,6 +47,8 @@ from csi_dsp import (
     select_subcarriers, hampel_filter, design_bandpass_sos,
     CausalSOSFilter, ht40_htltf_layout, HT40_TOTAL_ENTRIES
 )
+from dual_link import AGCFaultGuard
+from realtime_detect import StreamingHampel
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,9 @@ class ActivityWorker(threading.Thread):
         # DSP Setup
         self.sos = design_bandpass_sos(100.0, 0.5, 40.0, 4)
         self.filter = CausalSOSFilter(self.sos)
+        self.guard = AGCFaultGuard(log_mag_thresh=0.69, hold_limit=6)
+        self.hampel = StreamingHampel(half_window=3, threshold=2.5)
+        self._last_good_occ = None
         self.sub_cols = None
         self.plot_indices = None
 
@@ -111,12 +116,26 @@ class ActivityWorker(threading.Thread):
             else:
                 self.plot_indices = np.linspace(0, len(self.sub_cols) - 1, _NUM_SUBCARRIERS_TO_PLOT, dtype=int)
 
-        # Occupied carriers + Log transform
-        x_occ = amp[self.sub_cols]
+        # Occupied carriers
+        x_occ = amp[self.sub_cols].copy()
+
+        # AGC Fault Guard: Suppress common-mode multiplicative jumps from ESP32 gain dithering
+        is_ok, _ = self.guard.check(x_occ)
+        if not is_ok and self._last_good_occ is not None:
+            x_occ = self._last_good_occ.copy()
+        else:
+            self._last_good_occ = x_occ.copy()
+
+        # Log transform
         x_log = 20.0 * np.log10(x_occ + 1.0)
 
-        # Filter step (causal SOS)
-        filtered = self.filter.process(x_log[None, :])[0]
+        # Hampel outlier filtering: eliminates isolated spikes before bandpass filter
+        h_log = self.hampel.process(x_log)
+        if h_log is None:
+            return
+
+        # Filter step (causal SOS Butterworth 0.5–40 Hz)
+        filtered = self.filter.process(h_log[None, :])[0]
 
         # Rate counter
         self._pkt_count += 1
@@ -137,8 +156,8 @@ class ActivityWorker(threading.Thread):
             self.motion_energy = float(np.mean(var_sub))
 
             # Dynamic classification: Walking vs Sitting
-            # Baseline quiet sitting in room is ~0.15–0.40, walking is >0.52
-            energy_score = np.clip((self.motion_energy - 0.25) / 0.52, 0.0, 1.0)
+            # Baseline quiet sitting in room is ~0.15–0.30, walking is >0.45
+            energy_score = np.clip((self.motion_energy - 0.22) / 0.40, 0.0, 1.0)
             self.walking_prob = float(energy_score)
             self.is_walking = self.walking_prob > 0.50
             self.has_new_data = True
@@ -179,7 +198,7 @@ class ActivityWorker(threading.Thread):
                     reader._serial.reset_input_buffer()
                 target_mac = None
                 while self.running:
-                    if reader._serial and reader._serial.in_waiting > 4096:
+                    if reader._serial and reader._serial.in_waiting > 65536:
                         reader._serial.reset_input_buffer()
                     pkt = reader.read_one()
                     if pkt is not None:
