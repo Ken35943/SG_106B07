@@ -42,8 +42,8 @@ logger = logging.getLogger(__name__)
 
 _HISTORY_LEN = 200
 _NUM_SUBCARRIERS_TO_PLOT = 8
-_Y_MAX_HARD = 120.0   # never auto-scale above this
-_Y_MIN_SPAN = 50.0    # never auto-scale below this
+_Y_MAX_HARD = 5000.0   # allow near-field Tx high amplitude up to 5000
+_Y_MIN_SPAN = 50.0     # never auto-scale below this
 
 _PALETTE_8 = [
     "#00E5FF", "#E040FB", "#7C4DFF", "#00E676",
