@@ -124,13 +124,14 @@ class DualVisualizerWindow(QMainWindow):
         self.plot1 = pg.PlotWidget(title=f"Receiver 1 ({ports[0]}) — Subcarrier Amplitudes")
         self.plot1.setLabel("left", "Amplitude")
         self.plot1.setXRange(0, _HISTORY_LEN, padding=0)
-        self.plot1.setYRange(0, 50, padding=0.05)
+        self.plot1.setYRange(0, 100, padding=0.05)
         self.plot1.showGrid(x=True, y=True, alpha=0.25)
+        self.plot1.setMouseEnabled(x=False, y=True)
         layout.addWidget(self.plot1)
 
         self.curves1 = []
         for i in range(_NUM_SUBCARRIERS_TO_PLOT):
-            pen = pg.mkPen(color=_PALETTE_8[i % len(_PALETTE_8)], width=1.5)
+            pen = pg.mkPen(color=_PALETTE_8[i % len(_PALETTE_8)], width=1.8)
             self.curves1.append(self.plot1.plot(pen=pen))
 
         # 2. Plot Rx2
@@ -138,13 +139,14 @@ class DualVisualizerWindow(QMainWindow):
         self.plot2.setLabel("bottom", "Time (frames)")
         self.plot2.setLabel("left", "Amplitude")
         self.plot2.setXRange(0, _HISTORY_LEN, padding=0)
-        self.plot2.setYRange(0, 50, padding=0.05)
+        self.plot2.setYRange(0, 100, padding=0.05)
         self.plot2.showGrid(x=True, y=True, alpha=0.25)
+        self.plot2.setMouseEnabled(x=False, y=True)
         layout.addWidget(self.plot2)
 
         self.curves2 = []
         for i in range(_NUM_SUBCARRIERS_TO_PLOT):
-            pen = pg.mkPen(color=_PALETTE_8[i % len(_PALETTE_8)], width=1.5)
+            pen = pg.mkPen(color=_PALETTE_8[i % len(_PALETTE_8)], width=1.8)
             self.curves2.append(self.plot2.plot(pen=pen))
 
         self.worker = DualVisualizerWorker(ports=ports, baud=baud)
@@ -162,9 +164,14 @@ class DualVisualizerWindow(QMainWindow):
             data1 = self.worker.history_rx1.copy()
             data2 = self.worker.history_rx2.copy()
             fps = self.worker.sync_fps
+            r1 = self.worker.rate_rx1
+            r2 = self.worker.rate_rx2
             self.worker.has_new_data = False
 
-        self.lbl_info.setText(f"📡 Dual-Link Ingestion: Rx1 ({self.worker.ports[0]}) & Rx2 ({self.worker.ports[1]}) | Synchronized Frames: {fps:.0f} Hz")
+        self.lbl_info.setText(
+            f"📡 Dual-Link Ingestion | Rx1 ({self.worker.ports[0]}): {r1} pkts | "
+            f"Rx2 ({self.worker.ports[1]}): {r2} pkts | Synchronized: {fps:.0f} Hz"
+        )
 
         for i in range(_NUM_SUBCARRIERS_TO_PLOT):
             self.curves1[i].setData(data1[:, i])

@@ -147,49 +147,31 @@ class DualCSIReader:
                 link_key = "A" if w.name == "rx1" else "B"
                 for p in w.drain():
                     self._buf.setdefault(p.pkt_id, {})[link_key] = (p.t_us, p.amp.astype(np.float64))
-                    if self._next_emit_id is None:
-                        self._next_emit_id = p.pkt_id
 
-            if self._next_emit_id is None or not self._buf:
+            if not self._buf:
                 time.sleep(0.002)
                 continue
 
-            eid = self._next_emit_id
-            entry = self._buf.get(eid)
+            # Find common IDs present in both links
+            common_ids = [i for i, entry in self._buf.items() if "A" in entry and "B" in entry]
 
-            # Both links present -> clean emission
-            if entry and "A" in entry and "B" in entry:
-                del self._buf[eid]
-                self._next_emit_id += 1
-                if self._last_t_us is not None and entry["A"][0] <= self._last_t_us:
-                    continue
-                self._last_t_us = entry["A"][0]
-                return entry["A"][0] / 1e6, np.stack([entry["A"][1], entry["B"][1]])
+            if common_ids:
+                eid = min(common_ids)
+                entry = self._buf.pop(eid)
 
-            # Gap handling & interpolation
-            if entry is not None:
-                missing = "B" if "A" in entry else "A"
-                have = "A" if missing == "B" else "B"
-                ids = sorted(i for i, e in self._buf.items() if missing in e and have in e and i != eid)
-                if ids:
-                    k_prev = max((i for i in ids if i < eid), default=None)
-                    k_next = min((i for i in ids if i > eid), default=None)
-                    if k_prev is not None and k_next is not None and (k_next - k_prev) <= self.max_gap:
-                        amp_m, ok = self._interp(missing, eid, k_prev, k_next)
-                        if ok:
-                            entry[missing] = (entry[have][0], amp_m)
+                # Purge stale single-link entries older than the emitted ID
+                stale_ids = [i for i in self._buf if i < eid]
+                for si in stale_ids:
+                    del self._buf[si]
 
-                if "A" in entry and "B" in entry:
-                    del self._buf[eid]
-                    self._next_emit_id += 1
-                    if self._last_t_us is not None and entry["A"][0] <= self._last_t_us:
-                        continue
-                    self._last_t_us = entry["A"][0]
-                    return entry["A"][0] / 1e6, np.stack([entry["A"][1], entry["B"][1]])
+                t_sec = entry["A"][0] / 1e6
+                fused = np.stack([entry["A"][1], entry["B"][1]])
+                return t_sec, fused
 
-            # Fast-forward if buffer falls behind
-            if self._buf and eid < min(self._buf) - self.max_lag_ids:
-                self._next_emit_id = min(self._buf)
+            # Prevent buffer buildup if one link is lagging or dropped
+            if len(self._buf) > self.max_lag_ids:
+                oldest_id = min(self._buf.keys())
+                del self._buf[oldest_id]
 
             time.sleep(0.002)
 
