@@ -96,26 +96,12 @@ class SingleLinkStreamThread(threading.Thread):
                     reader._serial.reset_input_buffer()
 
                 while self.running:
-                    # Prevent serial backlog from causing delay
-                    if reader._serial:
-                        try:
-                            if reader._serial.in_waiting > 16384:
-                                reader._serial.reset_input_buffer()
-                        except Exception:
-                            pass
-
                     pkt = reader.read_one()
                     if pkt is None:
                         continue
 
                     amp, _ = extract_amplitude_phase(pkt.get("raw_data", []))
                     pkt_id = int(pkt.get("id", -1))
-
-                    # Filter AGC gain-glitch spikes
-                    gain_ok, _ = self._guard.check(amp)
-                    if not gain_ok:
-                        self.glitch_count += 1
-                        continue  # discard glitch frame so graph stays smooth
 
                     num_sub = len(amp)
                     with self.lock:
@@ -268,8 +254,8 @@ class DualVisualizerWindow(QMainWindow):
             r1, r2 = self.readers[0], self.readers[1]
             skew = abs(r1.last_id - r2.last_id) if r1.last_id >= 0 and r2.last_id >= 0 else -1
             self.lbl_info.setText(
-                f"Rx1 ({r1.port}): {r1.rate_hz:.0f} Hz (id {r1.last_id}, glitch {r1.glitch_count})  |  "
-                f"Rx2 ({r2.port}): {r2.rate_hz:.0f} Hz (id {r2.last_id}, glitch {r2.glitch_count})  |  "
+                f"Rx1 ({r1.port}): {r1.rate_hz:.0f} Hz (id {r1.last_id})  |  "
+                f"Rx2 ({r2.port}): {r2.rate_hz:.0f} Hz (id {r2.last_id})  |  "
                 f"id-skew: {skew}  |  GUI: {self._gui_fps:.0f} FPS"
             )
 
