@@ -86,6 +86,8 @@ class DualVizPump(threading.Thread):
         self.last_id = [-1, -1]
         self.rate_hz = [0.0, 0.0]
         self.has_new = [False, False]
+        self._last_row: list[Optional[np.ndarray]] = [None, None]
+        self.glitches = [0, 0]
         self._lock = threading.Lock()   # guards stats only; rings lock themselves
         self._cnt = [0, 0]
         self._t0 = time.monotonic()
@@ -137,13 +139,27 @@ class DualVizPump(threading.Thread):
             if dt > 0:
                 time.sleep(dt)
 
-    def _feed(self, link: int, pid: int, amp: np.ndarray) -> None:
+    def _feed(self, link: int, pid: int, amp: np.ndarray, gain_ok: bool = True) -> None:
         if self.plot_idx[link] is None or len(amp) != getattr(self, "_nsub", [None, None])[link]:
             self._nsub = getattr(self, "_nsub", [None, None])
             self._nsub[link] = len(amp)
             self.plot_idx[link] = _select_plot_indices(len(amp))
+        if not gain_ok and self._last_row[link] is not None:
+            # Firmware AGC gain-glitch frame: hold the previous row instead
+            # of plotting a 200–400% common-mode spike. The spike never
+            # enters the ring buffer, so waveforms, autoscale and any
+            # downstream consumer stay clean.
+            self.rings[link].push(self._last_row[link])
+            with self._lock:
+                self.glitches[link] += 1
+                self.last_id[link] = pid
+                self._cnt[link] += 1
+                self.has_new[link] = True
+            return
         try:
-            self.rings[link].push(np.asarray(amp[self.plot_idx[link]], dtype=np.float32))
+            row = np.asarray(amp[self.plot_idx[link]], dtype=np.float32)
+            self.rings[link].push(row)
+            self._last_row[link] = row
         except Exception:
             return  # length changed mid-stream; re-lock indices next packet
         with self._lock:
@@ -177,7 +193,8 @@ class DualVizPump(threading.Thread):
                     for link, w in enumerate(self.workers):
                         pkts = w.drain()          # single lock per link per loop
                         for p in pkts:
-                            self._feed(link, p.pkt_id, p.amp)
+                            self._feed(link, p.pkt_id, p.amp,
+                                       gain_ok=getattr(p, "gain_ok", True))
                             drained += 1
                         st = w.stats()
                         with self._lock:
@@ -220,6 +237,7 @@ class DualVizPump(threading.Thread):
                 "rate": list(self.rate_hz),
                 "last_id": list(self.last_id),
                 "pump_hz": self.pump_hz,
+                "glitches": list(self.glitches),
             }
 
     def stop(self) -> None:
@@ -332,9 +350,10 @@ class DualVisualizerWindow(QMainWindow):
         if now - self._last_text_t >= 0.25:
             self._last_text_t = now
             skew = abs(st["last_id"][0] - st["last_id"][1]) if min(st["last_id"]) >= 0 else -1
+            gl = st.get("glitches", [0, 0])
             self.lbl_info.setText(
-                f"Rx1: {st['rate'][0]:.0f} Hz (id {st['last_id'][0]})  |  "
-                f"Rx2: {st['rate'][1]:.0f} Hz (id {st['last_id'][1]})  |  "
+                f"Rx1: {st['rate'][0]:.0f} Hz (id {st['last_id'][0]}, glitch {gl[0]})  |  "
+                f"Rx2: {st['rate'][1]:.0f} Hz (id {st['last_id'][1]}, glitch {gl[1]})  |  "
                 f"id-skew: {skew}  |  pump: {st['pump_hz']:.0f} Hz  |  GUI: {self._gui_fps:.0f} FPS"
             )
 
