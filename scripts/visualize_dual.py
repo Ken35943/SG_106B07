@@ -366,7 +366,7 @@ class DualVisualizerWindow(QMainWindow):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser(description="Dual-Receiver CSI Real-Time Visualizer")
-    parser.add_argument("--ports", type=str, default="COM3,COM11", help="Comma-separated COM ports")
+    parser.add_argument("--ports", type=str, default="COM3,COM5", help="Comma-separated COM ports")
     parser.add_argument("--baud", type=int, default=921600, help="Baud rate")
     parser.add_argument("--mock", action="store_true", help="Synthetic dual streams (no hardware)")
     parser.add_argument("--gl", action="store_true",

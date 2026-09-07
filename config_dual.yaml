@@ -4,7 +4,7 @@
 
 dual:
   enabled: true
-  ports: ["COM3", "COM11"]            # [Rx1 (New S3-N16R8), Rx2 (Original S3)]
+  ports: ["COM3", "COM5"]            # [Rx1 (6 dBi), Rx2 (6 dBi)]
   baud_rate: 921600
   sync:
     mode: id_aligned                 # Sync by Tx-generated sequence ID
