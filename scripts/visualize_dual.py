@@ -96,31 +96,41 @@ class SingleLinkStreamThread(threading.Thread):
                     reader._serial.reset_input_buffer()
 
                 while self.running:
-                    pkt = reader.read_one()
-                    if pkt is None:
+                    try:
+                        pkt = reader.read_one()
+                        if pkt is None:
+                            continue
+
+                        raw_data = pkt.get("raw_data", [])
+                        amp, _ = extract_amplitude_phase(raw_data)
+                        if len(amp) != HT40_TOTAL_ENTRIES:
+                            continue  # discard any malformed or truncated packet
+
+                        try:
+                            pkt_id = int(pkt.get("id", -1))
+                        except (ValueError, TypeError):
+                            pkt_id = -1
+
+                        with self.lock:
+                            if self.history_buffer is None or self.history_buffer.shape[1] != HT40_TOTAL_ENTRIES:
+                                self.history_buffer = np.zeros((self.history_len, HT40_TOTAL_ENTRIES), dtype=np.float32)
+
+                            self.history_buffer = np.roll(self.history_buffer, -1, axis=0)
+                            self.history_buffer[-1, :] = amp
+                            self.latest_amp = amp
+                            self.has_new_data = True
+                            self.packet_count += 1
+                            self.last_id = pkt_id
+
+                            self._win_count += 1
+                            now = time.monotonic()
+                            if now - self._win_t0 >= 1.0:
+                                self.rate_hz = self._win_count / (now - self._win_t0)
+                                self._win_count = 0
+                                self._win_t0 = now
+                    except Exception as err:
+                        logger.debug("[%s] Skipped malformed packet: %s", self.name, err)
                         continue
-
-                    amp, _ = extract_amplitude_phase(pkt.get("raw_data", []))
-                    pkt_id = int(pkt.get("id", -1))
-
-                    num_sub = len(amp)
-                    with self.lock:
-                        if self.history_buffer is None or self.history_buffer.shape[1] != num_sub:
-                            self.history_buffer = np.zeros((self.history_len, num_sub), dtype=np.float32)
-
-                        self.history_buffer = np.roll(self.history_buffer, -1, axis=0)
-                        self.history_buffer[-1, :] = amp
-                        self.latest_amp = amp
-                        self.has_new_data = True
-                        self.packet_count += 1
-                        self.last_id = pkt_id
-
-                        self._win_count += 1
-                        now = time.monotonic()
-                        if now - self._win_t0 >= 1.0:
-                            self.rate_hz = self._win_count / (now - self._win_t0)
-                            self._win_count = 0
-                            self._win_t0 = now
 
         except Exception as e:
             logger.error("[%s] Serial error on %s: %s", self.name, self.port, e)
@@ -246,7 +256,8 @@ class DualVisualizerWindow(QMainWindow):
             # Update curves with lightning-fast QPainter
             indices = self.subcarrier_indices[k]
             for i, idx in enumerate(indices):
-                self.curves[k][i].setData(history[:, idx], skipFiniteCheck=True)
+                if idx < num_sub:
+                    self.curves[k][i].setData(history[:, idx], skipFiniteCheck=True)
 
         # Update header text at 4 Hz (re-layout is costly, don't do it every frame)
         if now - self._last_hdr_t >= 0.25:
