@@ -1,0 +1,27 @@
+# =============================================================================
+# ESP32-S3 Multi-Static Dual-Receiver Fall Detection System — Configuration
+# =============================================================================
+
+dual:
+  enabled: true
+  ports: ["COM3", "COM11"]            # [Rx1 (New S3-N16R8), Rx2 (Original S3)]
+  baud_rate: 921600
+  sync:
+    mode: id_aligned                 # Sync by Tx-generated sequence ID
+    max_lag_ids: 40                  # ~0.54s worst-case fusion latency
+    interp_max_gap: 20               # Interpolate <=20-id gaps
+  paths:
+    data_raw: "data/raw_dual"
+    data_processed: "data/processed_dual"
+    pipeline_states:
+      - "data/processed_dual/pipeline_state_rx1.pkl"
+      - "data/processed_dual/pipeline_state_rx2.pkl"
+  model:
+    fusion: spatial_multihead        # spatial_multihead | early
+    input_features: 20               # per-link PCA components
+  realtime:
+    fallback_link: "A"               # auto single-link fallback if Link B dies
+    stride: 25
+    fall_threshold: 0.80
+    consecutive_windows: 2
+    cooldown_seconds: 5.0
