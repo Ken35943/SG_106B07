@@ -8,8 +8,8 @@ dual:
   baud_rate: 921600
   sync:
     mode: id_aligned                 # Sync by Tx-generated sequence ID
-    max_lag_ids: 40                  # ~0.54s worst-case fusion latency
-    interp_max_gap: 20               # Interpolate <=20-id gaps
+    max_lag_ids: 40                  # ~0.8 s worst-case fusion latency at 50 Hz
+    interp_max_gap: 20               # Interpolate <=20-id gaps (~0.4 s at 50 Hz)
   paths:
     data_raw: "data/raw_dual"
     data_processed: "data/processed_dual"
@@ -21,7 +21,7 @@ dual:
     input_features: 20               # per-link PCA components
   realtime:
     fallback_link: "A"               # auto single-link fallback if Link B dies
-    stride: 25
+    stride: 12                       # grid samples between inferences (~240 ms at 50 Hz)
     fall_threshold: 0.80
     consecutive_windows: 2
     cooldown_seconds: 5.0

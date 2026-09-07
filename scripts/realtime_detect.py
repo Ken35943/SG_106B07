@@ -168,6 +168,17 @@ class RealtimeFallDetector:
         self.fs = float(st.get("sample_rate", 100.0))
         self.window_size = int(st.get("window_size", 100))
 
+        # Migration guard: the fitted state carries its own sample rate, so a
+        # stale pipeline_state.pkl (e.g. 100 Hz artifacts after the 50 Hz
+        # transition) would silently run the wrong filter/window timing.
+        cfg_fs = float(config.get("csi", {}).get("sample_rate", self.fs))
+        if abs(cfg_fs - self.fs) / max(self.fs, 1e-9) > 0.01:
+            logger.warning(
+                "pipeline_state sample_rate (%.1f Hz) != config csi.sample_rate "
+                "(%.1f Hz) — re-run scripts/preprocess.py before trusting output!",
+                self.fs, cfg_fs,
+            )
+
         if self.subcarrier_cols is None:
             logger.warning(
                 "pipeline_state.pkl has no subcarrier selection — using ALL raw "
@@ -452,7 +463,7 @@ def main() -> None:
     parser.add_argument("--replay", type=Path, default=None, help="Replay an existing CSV file instead of live serial")
     parser.add_argument("--mock", action="store_true", help="Run with simulated synthetic CSI packets")
     parser.add_argument("--threshold", type=float, default=None, help="Fall confidence threshold (e.g. 0.80)")
-    parser.add_argument("--stride", type=int, default=None, help="Inference stride in grid samples (e.g. 25 = 250 ms)")
+    parser.add_argument("--stride", type=int, default=None, help="Inference stride in grid samples (e.g. 12 ≈ 240 ms at 50 Hz)")
     parser.add_argument("--no-beep", action="store_true", help="Disable audio alarm")
     args = parser.parse_args()
 
@@ -472,7 +483,6 @@ def main() -> None:
     print(f"  Model checkpoint : {args.model}")
     print(f"  Pipeline state   : {args.pipeline}")
     print(f"  Fall Threshold   : {threshold * 100:.0f}%")
-    print(f"  Inference Stride : every {stride} grid samples (~{stride * 10} ms)")
     print(f"  Alarm Cooldown   : {cooldown}s")
     print("=" * 76)
 
@@ -486,6 +496,8 @@ def main() -> None:
         cooldown_seconds=cooldown,
         beep_enabled=beep_enabled,
     )
+    # fs-aware stride readout (was hardcoded as stride*10 ms = 100 Hz assumption)
+    print(f"  Inference Stride : every {stride} grid samples (~{stride * 1000 / detector.fs:.0f} ms @ {detector.fs:.0f} Hz)")
 
     if args.replay:
         stream = stream_from_csv(args.replay)
