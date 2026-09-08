@@ -1,5 +1,18 @@
+# Virtual Environment & Python
 venv/
-logs/
+env/
 __pycache__/
 *.pyc
+*.pyo
+
+# IDE & Scratch files
+.vscode/
+.idea/
+scratch/
+
+# Runtime logs & OS artifacts
+logs/
+*.log
+.DS_Store
+Thumbs.db
 .env
