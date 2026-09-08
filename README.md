@@ -152,24 +152,25 @@ Input Tensor: Window of 100 samples × 20 PCA components (1.0 s @ 100 Hz)
          └── Class 1: Normal Daily Activity (Walking, Sitting, Standing, Resting)
 ```
 
-### Model Evaluation Results
+### Model Evaluation Results & Limitations
 
-Evaluation strictly emphasizes the minority positive class (**Fall**) using PR-AUC and ROC-AUC:
+The evaluation pipeline strictly emphasizes the minority positive class (**Fall**) using **Precision-Recall Area Under Curve (PR-AUC)** and **ROC-AUC** to handle class imbalance.
 
-| Metric | Score | Target / Significance |
-|:---|:---:|:---|
-| **Validation Accuracy** | **74.24%** | Uncontaminated zero-leakage evaluation |
-| **PR-AUC (Fall)** | **0.658** | Area under Precision-Recall Curve (Baseline = 0.22) |
-| **ROC-AUC** | **0.781** | High separability between falls and daily motion |
-| **Inference Latency** | **< 3.2 ms** | Real-time on NVIDIA RTX 3050 Laptop GPU / CPU |
+**Current Evaluation Status**:
+- **Best Validation Accuracy**: **74.24%** (under strictly zero-leakage `GroupShuffleSplit`).
+- **Inference Latency**: **< 3.2 ms** (real-time capable on NVIDIA RTX 3050 Laptop GPU / CPU).
+- **AUC Metrics (Pending)**: Due to the limited size of the initial physical dataset, the held-out test set currently contains only positive samples (Fall). As a result, robust PR-AUC and ROC-AUC metrics cannot be reliably calculated yet. 
+
+### Raw CSI Data Visualization
+Rather than presenting overfitted or synthetic evaluation curves, we visualize the actual physical data captured by our dual-ESP32 setup. The spectrograms below demonstrate the distinct physical signatures of a Fall versus Normal Walking:
 
 <p align="center">
-  <img src="assets/confusion_matrix.png" width="31%" alt="Confusion Matrix" />
-  <img src="assets/roc_curve.png" width="31%" alt="ROC Curve" />
-  <img src="assets/pr_curve.png" width="31%" alt="Precision-Recall Curve" />
+  <img src="assets/csi_comparison.png" width="95%" alt="CSI Amplitude Variation: Fall vs Walking" />
   <br />
-  <em>Evaluation curves: Confusion Matrix, ROC-AUC, and Precision-Recall characteristics.</em>
+  <em>Raw CSI Data: Notice the sharp, sudden amplitude disruption across all subcarriers during a fall (Left) compared to the periodic, low-frequency oscillations of normal walking (Right).</em>
 </p>
+
+> **Note**: The evaluation script (`model/evaluate.py`) is fully implemented to generate Confusion Matrices, ROC curves, and PR curves, and will automatically produce these artifacts once a larger, multi-class test dataset is collected.
 
 ---
 
