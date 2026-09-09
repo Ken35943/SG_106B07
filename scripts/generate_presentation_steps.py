@@ -231,7 +231,7 @@ def create_step3_grouping_data():
 # ==============================================================================
 def create_step4_train_model():
     fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(16, 9), facecolor=BG_DARK, dpi=150)
-    fig.subplots_adjust(left=0.08, right=0.92, top=0.84, bottom=0.14, wspace=0.22)
+    fig.subplots_adjust(left=0.08, right=0.92, top=0.76, bottom=0.12, wspace=0.22)
 
     apply_clean_theme(ax_loss)
     apply_clean_theme(ax_acc)
@@ -256,7 +256,7 @@ def create_step4_train_model():
     ax_loss.scatter([best_epoch], [best_loss], color=ACCENT_GREEN, s=130, zorder=6)
     ax_loss.set_xlabel("Epoch", fontsize=13, labelpad=8)
     ax_loss.set_ylabel("Cross-Entropy Loss", fontsize=13, labelpad=8)
-    ax_loss.set_title(f"Real Loss Convergence (Best: {best_loss:.4f})", fontsize=16, pad=12)
+    ax_loss.set_title(f"Real Loss Convergence (Best: {best_loss:.4f})", fontsize=15, pad=10)
     ax_loss.legend(loc="upper right", fontsize=12, facecolor="#242736", edgecolor=PANEL_BORDER, labelcolor=TEXT_WHITE)
 
     # Real Accuracy Curves
@@ -265,16 +265,16 @@ def create_step4_train_model():
     ax_acc.scatter([best_epoch], [best_acc], color=ACCENT_GREEN, s=130, zorder=6)
     ax_acc.set_xlabel("Epoch", fontsize=13, labelpad=8)
     ax_acc.set_ylabel("Accuracy (%)", fontsize=13, labelpad=8)
-    ax_acc.set_title(f"Real Accuracy Convergence (Best: {best_acc:.2f}%)", fontsize=16, pad=12)
+    ax_acc.set_title(f"Real Accuracy Convergence (Best: {best_acc:.2f}%)", fontsize=15, pad=10)
     ax_acc.set_ylim(50, 105)
     ax_acc.legend(loc="lower right", fontsize=12, facecolor="#242736", edgecolor=PANEL_BORDER, labelcolor=TEXT_WHITE)
 
-    # Highlight Callout Badge
-    fig.text(0.5, 0.89, f"Best Model Checkpoint: Epoch {best_epoch} (Validation Accuracy: {best_acc:.2f}%)",
-             ha="center", va="center", fontsize=17, fontweight="bold", color=ACCENT_GREEN,
-             bbox=dict(boxstyle="round,pad=0.5", fc="#1c2b22", ec=ACCENT_GREEN, lw=2))
+    # Highlight Callout Badge (Positioned cleanly between title and subplots)
+    fig.text(0.5, 0.865, f"Best Model Checkpoint: Epoch {best_epoch} (Validation Accuracy: {best_acc:.2f}%)",
+             ha="center", va="center", fontsize=15, fontweight="bold", color=ACCENT_GREEN,
+             bbox=dict(boxstyle="round,pad=0.45", fc="#1c2b22", ec=ACCENT_GREEN, lw=2))
 
-    fig.suptitle("Step 4: AI Model Training Convergence (Real 30 Epochs)", fontsize=19, fontweight="bold", color=TEXT_WHITE, y=0.97)
+    fig.suptitle("Step 4: AI Model Training Convergence (Real 30 Epochs)", fontsize=21, fontweight="bold", color=TEXT_WHITE, y=0.96)
 
     save_path = OUT_DIR / "step4_train_model.png"
     plt.savefig(str(save_path), facecolor=BG_DARK, bbox_inches="tight", dpi=150)
@@ -318,13 +318,18 @@ def create_step5_detection_alert():
     ax.axvspan(0, 5.5, color=ACCENT_CYAN, alpha=0.10)
     ax.text(2.75, energy.max() * 0.88, "1. PRE-FALL MOVEMENT\n(Active Motion in Room)", ha="center", fontsize=12.5, fontweight="bold", color=ACCENT_CYAN)
 
-    # Phase 2: Fall Impact Shockwave (5.5 to 7.0s)
-    ax.axvspan(5.5, 7.0, color=ACCENT_RED, alpha=0.22)
-    ax.text(6.25, energy.max() * 0.88, "2. FALL IMPACT!\n(Alarm Triggered)", ha="center", fontsize=13, fontweight="bold", color=ACCENT_RED)
+    # 3-Phase Biomechanical Fall Signature Zones
+    # Phase 1: Pre-Fall Movement (0 to 5.5s)
+    ax.axvspan(0, 5.5, color=ACCENT_CYAN, alpha=0.10)
+    ax.text(2.75, energy.max() * 0.88, "1. PRE-FALL MOVEMENT\n(Active Motion in Room)", ha="center", fontsize=12.5, fontweight="bold", color=ACCENT_CYAN)
 
-    # Phase 3: Post-Fall Immobility (7.0 to 9.0s) - Key feature requested!
-    ax.axvspan(7.0, 9.0, color=ACCENT_GREEN, alpha=0.15)
-    ax.text(8.0, energy.max() * 0.88, "3. POST-FALL STILLNESS\n(Subject Lying on Floor)", ha="center", fontsize=12.5, fontweight="bold", color=ACCENT_GREEN)
+    # Phase 2: Fall Impact Shockwave (5.5 to 7.2s)
+    ax.axvspan(5.5, 7.2, color=ACCENT_RED, alpha=0.22)
+    ax.text(6.35, energy.max() * 0.88, "2. FALL IMPACT!\n(Alarm Triggered)", ha="center", fontsize=13, fontweight="bold", color=ACCENT_RED)
+
+    # Phase 3: Post-Fall Immobility (7.2 to end) - Perfectly covers stillness to the edge!
+    ax.axvspan(7.2, t_sec[-1], color=ACCENT_GREEN, alpha=0.15)
+    ax.text((7.2 + t_sec[-1]) / 2, energy.max() * 0.88, "3. POST-FALL STILLNESS\n(Subject Lying on Floor)", ha="center", fontsize=12.5, fontweight="bold", color=ACCENT_GREEN)
 
     # Peak impact callout
     peak_t = t_sec[np.argmax(energy)]
@@ -336,16 +341,17 @@ def create_step5_detection_alert():
                 arrowprops=dict(arrowstyle="->", color=ACCENT_RED, lw=2.2))
 
     # Immobility callout
-    still_t = 8.0
+    still_t = 8.1
     still_val = energy[int(still_t * 100)]
     ax.annotate(f"Post-Fall Immobility (The Stillness Phase)\nEnergy drops to {still_val:.1f} dB² (Flat Baseline)\nConfirming Person is Down!",
-                xy=(still_t, still_val), xytext=(still_t - 0.5, peak_val * 0.35),
+                xy=(still_t, still_val), xytext=(still_t - 0.6, peak_val * 0.35),
                 ha="center", fontsize=12, fontweight="bold", color=TEXT_WHITE,
                 bbox=dict(boxstyle="round,pad=0.5", fc="#172b22", ec=ACCENT_GREEN, lw=2.0),
                 arrowprops=dict(arrowstyle="->", color=ACCENT_GREEN, lw=2.0))
 
     ax.set_xlabel("Time (seconds)", fontsize=14, labelpad=10)
     ax.set_ylabel("Kinetic Motion Energy (dB²)", fontsize=14, labelpad=10)
+    ax.set_xlim(0, t_sec[-1])
     ax.set_ylim(0, peak_val * 1.08)
     ax.set_title("Step 5: 3-Phase Fall Signature (Movement -> Impact -> Post-Fall Stillness)", fontsize=16, pad=12)
 
