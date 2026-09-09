@@ -57,8 +57,8 @@ This project implements an end-to-end wireless sensing system using **Channel St
                                                           Median outlier suppression
                                                                       │
                                                                       ▼
-                                                          [Causal SOS Bandpass]
-                                                          0.5 - 40 Hz 4th-Order IIR
+                                                           [Causal SOS Bandpass]
+                                                           0.5 - 40 Hz 8th-Order (4 SOS)
                                                                       │
                                                                       ▼
                                                           [Sliding Window: 1s (100×20)]
@@ -107,15 +107,15 @@ The system is deployed in a single-link bistatic transceiver topology:
 ## Core Engineering Innovations
 
 ### 1. Hardware AGC Step Suppression (`AGCFaultGuard`)
-At fringe signal levels, the ESP32 Wi-Fi PHY AGC switches internal analog gain stages (e.g. LNA/VGA steps 24 $\leftrightarrow$ 26). Because firmware gain compensation operates with a single-packet latency relative to analog switching, raw CSI amplitudes occasionally suffer instantaneous common-mode gain jumps across all subcarriers simultaneously.
+At fringe signal levels, the ESP32 Wi-Fi PHY AGC switches internal analog gain stages (e.g. LNA/VGA steps 24 $\leftrightarrow$ 26). Because firmware gain compensation operates with a single-packet latency relative to analog switching, raw CSI amplitudes occasionally suffer instantaneous common-mode gain jumps across all subcarriers simultaneously (empirically $\approx \pm 6 \text{ dB}$, up to $+10$ to $+20 \text{ dB}$ under severe dithering).
 - **The Solution**: An online metric tracking frame-to-frame log-ratio uniformity across subcarriers:
   $$\mu = \text{mean}\left(\log \frac{A_k[t]}{A_k[t-1]}\right), \quad \sigma = \text{std}\left(\log \frac{A_k[t]}{A_k[t-1]}\right)$$
-  When $\sigma \approx 0$ while $|\mu|$ is large, the frame is flagged as an artificial gain step and suppressed, preventing severe filter ringing.
+  When $\sigma \approx 0$ (< 0.35) while $|\mu|$ is large (> 0.69 $\approx 6 \text{ dB}$), the frame is flagged as an artificial gain step and suppressed, preventing severe filter ringing.
 - **Note**: `AGCFaultGuard` is currently deployed in the real-time Activity Monitor GUI and `dual_link.py`. The Fall Detection runtime uses `StreamingHampel` as its primary defense.
 
-### 2. Streaming Hampel Filter (`StreamingHampel`)
+### 2. Streaming Hampel Filter (`StreamingHampel`, Low-Latency / Quasi-Causal)
 Isolated packet corruptions and RF noise impulses act as step inputs to narrow IIR bandpass filters, causing impulse ringing.
-- **The Solution**: A streaming sliding-window Hampel filter with bounded look-ahead delay (~50 ms at 100 Hz) computing the rolling median and Median Absolute Deviation (MAD):
+- **The Solution**: A streaming sliding-window Hampel filter with bounded look-ahead delay (~50 ms at 100 Hz due to a centered $2k+1$ window) computing the rolling median and Median Absolute Deviation (MAD):
   $$\text{MAD} = 1.4826 \times \text{median}(|x - \text{median}(x)|)$$
   Outliers exceeding threshold $\times \text{MAD}$ are replaced with the local median prior to bandpass filtering, stabilizing the IIR state.
 
@@ -124,12 +124,12 @@ Human torso movement during a fall produces characteristic Doppler frequencies:
 $$f_D \le \frac{2v}{\lambda} \approx 16 \text{ Hz per m/s} \implies 32 - 49 \text{ Hz theoretical upper bound for fall}$$
 - Traditional 10 Hz low-pass filters eliminate the critical fall transient.
 - Non-causal zero-phase filtering (`filtfilt`) cannot run in real time.
-- **The Solution**: A stateful, causal 4th-order Butterworth filter implemented in Second-Order Sections (SOS). The 0.5 Hz high-pass edge removes static DC multipath from walls and furniture; the 40 Hz low-pass edge rejects high-frequency noise while preserving rapid fall signatures.
+- **The Solution**: A stateful, causal 8th-order Butterworth band-pass implemented as 4 second-order sections (SOS). The 0.5 Hz high-pass edge removes static DC multipath from walls and furniture; the 40 Hz low-pass edge rejects high-frequency noise while preserving rapid fall signatures.
 
 ### 4. Leakage-Free Machine Learning Pipeline
 Overlapping sliding windows extracted from time-series recordings share temporal information. Randomly partitioning windows into train/test sets contaminates test distributions, artificially inflating validation accuracy.
 - **The Solution**: The dataset is segmented strictly at the recording session level using `GroupShuffleSplit` on `groups.npy`. Windows from any given physical recording session exist entirely in the training split or the test split, never both.
-- **Note on Current Data**: Fall-class training data is currently synthetic (generated via `scripts/generate_synthetic_falls.py`). Walking/Sitting data is from real physical recordings. See [Limitations](docs/SG_PROJECT_DAY_KNOWLEDGE_BASE.md#10-ข้อจำกัดของโครงงาน-limitations).
+- **Note on Current Data**: Fall-class training data is currently synthetic (generated via `scripts/generate_synthetic_falls.py`). Walking/Sitting data is from real physical recordings. See [Limitations](docs/SG_PROJECT_DAY_KNOWLEDGE_BASE.md#9-ข้อจำกัดของโครงงาน-limitations).
 
 ---
 
@@ -159,11 +159,12 @@ Input Tensor: Window of 100 samples × 20 PCA components (1.0 s @ 100 Hz)
 The evaluation pipeline is designed to emphasize the minority positive class (**Fall**) using **PR-AUC** and **ROC-AUC** to handle class imbalance.
 
 **Current Evaluation Status**:
+- **Evaluation Positioning**: **Proof-of-concept model evaluation** under zero-leakage conditions, **not yet a clinical real-world fall-detection accuracy benchmark**.
 - **Checkpoint Validation Accuracy (by lowest val loss)**: **74.24%** (epoch 1, val loss = 0.4228; under strictly zero-leakage `GroupShuffleSplit`).
-- **Peak Observed Validation Accuracy**: 78.79% (epoch 3, but val loss = 1.23 indicates overfitting; checkpoint not used).
+- **Peak Observed Validation Accuracy**: 78.79% (epoch 3; higher validation loss [1.23 vs 0.42] than the selected checkpoint, so it was not selected).
 - **Inference Latency**: **< 3.2 ms** (real-time capable on NVIDIA RTX 3050 Laptop GPU / CPU).
 - **AUC Metrics**: Not yet reportable — current test set contains only Fall-class samples (54 windows, test accuracy 42.6%). Robust PR-AUC and ROC-AUC require a multi-class test dataset.
-- **Data Limitation**: Fall-class training samples are currently **synthetic** (generated by `scripts/generate_synthetic_falls.py`). Walking/Sitting samples are from real physical recordings.
+- **Data Provenance**: Fall-class training samples are currently **synthetic** (generated by `scripts/generate_synthetic_falls.py` using a 3-phase kinematic fall model for human subject safety). Walking/Sitting samples are from real physical recordings. Physical cushioned falls (`data/raw/fall_*`) were captured for preliminary calibration and testing.
 
 > **Note**: This project demonstrates a **working sensing prototype**, not clinical-grade accuracy. The evaluation script (`model/evaluate.py`) will automatically produce Confusion Matrices, ROC curves, and PR curves once a larger, multi-class test dataset with real fall recordings is collected.
 
@@ -319,7 +320,7 @@ python model/evaluate.py
 | Symptom | Root Cause | Resolution |
 |:---|:---|:---|
 | **Stale Serial Backlog / Packet Lag** | Structural oversubscription: 921,600 baud carries ~92 kB/s while Tx broadcasts at 100 Hz (~150 kB/s). | Handled automatically by decoupled ingestion threads and high-watermark serial buffer purging (64 kB threshold). |
-| **Periodic ±6 dB Spikes During Stillness** | ESP32 internal PHY AGC switches gain steps (24 $\leftrightarrow$ 26) with 1-packet compensation lag. | Suppressed via `AGCFaultGuard` and `StreamingHampel` prior to the IIR bandpass filter. |
+| **Periodic Common-Mode Gain Spikes (~±6 dB to +10 dB)** | ESP32 internal PHY AGC switches gain steps (24 $\leftrightarrow$ 26) with 1-packet compensation lag. | Suppressed via `AGCFaultGuard` and `StreamingHampel` prior to the IIR bandpass filter. |
 | **Halved Frame Rate (30 Hz instead of 65 Hz)** | Aggressive serial buffer flushing (`in_waiting > 4096`) discarding valid packet frames. | Purge threshold raised to 64 kB (`scripts/realtime_activity_demo.py`), preserving contiguous packets. |
 | **All Predictions Report NORMAL** | `realtime_detect.py` is a binary fall classifier; walking is defined as Daily Activity (Normal). | Normal behavior. To observe live motion sensitivity, run `scripts/realtime_activity_demo.py` or simulate falls with `--threshold 0.50`. |
 
