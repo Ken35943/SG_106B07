@@ -93,9 +93,9 @@ class AGCFaultGuard:
 
     def __init__(
         self,
-        log_mag_thresh: float = 0.69,  # exp(0.69) ≈ ×2.0 common-mode jump
-        uniformity_tol: float = 0.35,  # std(log-ratio) ceiling for "lockstep"
-        hold_limit: int = 6,
+        log_mag_thresh: float = 0.69,  # exp(0.69) ≈ ×2.0 common-mode jump (±6 dB)
+        uniformity_tol: float = 0.35,  # std(log-ratio) ceiling: genuine motion is frequency-selective (s > 0.35)
+        hold_limit: int = 3,           # AGC glitches resolve in 1-2 frames; never freeze for long
         mask_percentile: float = 40.0,  # carriers above this energy percentile
     ):
         self._log_mag_thresh = float(log_mag_thresh)
@@ -122,7 +122,10 @@ class AGCFaultGuard:
         lr = np.log((x[mask] + eps) / (prev[mask] + eps))
         m = float(lr.mean())
         s = float(lr.std())
-        if m >= self._log_mag_thresh and s <= self._uniformity_tol:
+        # Genuine AGC glitch multiplies all carriers uniformly (|m| >= 0.69 and s <= 0.35).
+        # Human motion is frequency-selective (s > 0.35) and will never be flagged.
+        is_glitch = abs(m) >= self._log_mag_thresh and s <= self._uniformity_tol
+        if is_glitch:
             if self._held < self._hold_limit:
                 self._held += 1
                 return False, m  # glitch: reference frame NOT updated

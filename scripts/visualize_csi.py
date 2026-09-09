@@ -60,7 +60,9 @@ import pandas as pd
 from pathlib import Path
 
 # Subcarrier selection
-from csi_dsp import ht40_htltf_layout, HT40_TOTAL_ENTRIES
+from csi_dsp import ht40_htltf_layout, HT40_TOTAL_ENTRIES, StreamingResampler
+from dual_link import AGCFaultGuard
+from realtime_detect import StreamingHampel
 
 
 class CSIReaderThread(threading.Thread):
@@ -68,7 +70,7 @@ class CSIReaderThread(threading.Thread):
 
     def __init__(self, port: str = _DEFAULT_PORT, baud_rate: int = _DEFAULT_BAUD,
                  replay: Optional[str] = None, mock: bool = False,
-                 history_len: int = _HISTORY_LEN):
+                 history_len: int = _HISTORY_LEN, apply_guard: bool = True):
         super().__init__(daemon=True)
         self.port = port
         self.baud_rate = baud_rate
@@ -77,6 +79,11 @@ class CSIReaderThread(threading.Thread):
         self.history_len = history_len
         self.running = True
         self.target_mac = None
+        # Use StreamingResampler (100 Hz grid) to seamlessly bridge Wi-Fi packet drops
+        self.resampler = StreamingResampler(100.0) if apply_guard else None
+        # Use low-latency Hampel filter (half_window=2 -> 20 ms delay) to eliminate
+        # isolated needle spikes without freezing or clipping real human walking waves
+        self.hampel = StreamingHampel(half_window=2, threshold=2.5) if apply_guard else None
 
         # Thread-safe shared buffers
         self.lock = threading.Lock()
@@ -116,7 +123,12 @@ class CSIReaderThread(threading.Thread):
         n_rows = len(data)
         idx = 0
         while self.running:
-            self._push_amp(data[idx])
+            amp = data[idx].copy()
+            if self.hampel is not None:
+                h_amp = self.hampel.process(amp)
+                if h_amp is not None:
+                    amp = h_amp.astype(np.float32)
+            self._push_amp(amp)
             idx = (idx + 1) % n_rows
             time.sleep(0.01)  # ~100 Hz replay rate
 
@@ -140,7 +152,7 @@ class CSIReaderThread(threading.Thread):
                     reader._serial.reset_input_buffer()
 
                 while self.running:
-                    if reader._serial and reader._serial.in_waiting > 4096:
+                    if reader._serial and reader._serial.in_waiting > 65536:
                         reader._serial.reset_input_buffer()
 
                     pkt = reader.read_one()
@@ -151,8 +163,16 @@ class CSIReaderThread(threading.Thread):
                             logger.info(f"Locked onto Sender MAC: {self.target_mac}")
 
                         if mac == self.target_mac:
+                            t_pkt = time.time()
                             amp, _ = extract_amplitude_phase(pkt["raw_data"])
-                            self._push_amp(amp)
+                            rows = self.resampler.push(t_pkt, amp) if self.resampler is not None else [amp]
+                            for row in rows:
+                                if self.hampel is not None:
+                                    h_amp = self.hampel.process(row)
+                                    if h_amp is None:
+                                        continue
+                                    row = h_amp.astype(np.float32)
+                                self._push_amp(row)
         except Exception as e:
             logger.error(f"Serial reader exception: {e}")
 
@@ -162,10 +182,12 @@ class CSIReaderThread(threading.Thread):
 
 class CSIVisualiser(QMainWindow):
     def __init__(self, port: str = _DEFAULT_PORT, baud: int = _DEFAULT_BAUD,
-                 replay: Optional[str] = None, mock: bool = False):
+                 replay: Optional[str] = None, mock: bool = False, raw: bool = False):
         super().__init__()
         mode_str = f"Replay: {Path(replay).name}" if replay else ("Mock Mode" if mock else f"Live: {port}")
-        self.setWindowTitle(f"CSI Raw Subcarrier Amplitudes (Real-Time 60 FPS) — [{mode_str}]")
+        if not raw and not replay and not mock:
+            mode_str += " | Resampled (100 Hz) + Hampel"
+        self.setWindowTitle(f"CSI Subcarrier Amplitudes (Real-Time 60 FPS) — [{mode_str}]")
         self.resize(1100, 850)
 
         # Native C++ QPainter (150+ FPS capable)
@@ -215,7 +237,7 @@ class CSIVisualiser(QMainWindow):
         self.subcarrier_indices = None
 
         # Start data acquisition thread
-        self.reader_thread = CSIReaderThread(port, baud, replay=replay, mock=mock, history_len=_HISTORY_LEN)
+        self.reader_thread = CSIReaderThread(port, baud, replay=replay, mock=mock, history_len=_HISTORY_LEN, apply_guard=not raw)
         self.reader_thread.start()
 
         # GUI Update Timer locked to 60 FPS (16 ms)
@@ -274,10 +296,11 @@ def main():
     parser.add_argument("--baud", type=int, default=_DEFAULT_BAUD, help="Baud rate (default: 921600)")
     parser.add_argument("--replay", type=str, default=None, help="Path to CSV file to replay")
     parser.add_argument("--mock", action="store_true", help="Run with simulated CSI frames")
+    parser.add_argument("--raw", action="store_true", help="Show raw hardware amplitudes without Hampel filtering")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    window = CSIVisualiser(args.port, args.baud, replay=args.replay, mock=args.mock)
+    window = CSIVisualiser(args.port, args.baud, replay=args.replay, mock=args.mock, raw=args.raw)
     window.show()
     sys.exit(app.exec())
 

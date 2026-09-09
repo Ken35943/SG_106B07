@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parse_csi import CSIDataReader, extract_amplitude_phase
 from csi_dsp import ht40_htltf_layout, HT40_TOTAL_ENTRIES
 from dual_link import AGCFaultGuard
+from realtime_detect import StreamingHampel
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,9 @@ class SingleLinkStreamThread(threading.Thread):
         self.glitch_count = 0
         self.rate_hz = 0.0
         self.last_id = -1
-        self._guard = AGCFaultGuard()
+        self._guard = AGCFaultGuard(log_mag_thresh=0.45, uniformity_tol=0.55, hold_limit=6)
+        self._hampel = StreamingHampel(half_window=3, threshold=2.5)
+        self._last_good_amp = None
 
         self._win_count = 0
         self._win_t0 = time.monotonic()
@@ -105,6 +108,11 @@ class SingleLinkStreamThread(threading.Thread):
                         amp, _ = extract_amplitude_phase(raw_data)
                         if len(amp) != HT40_TOTAL_ENTRIES:
                             continue  # discard any malformed or truncated packet
+
+                        h_amp = self._hampel.process(amp)
+                        if h_amp is None:
+                            continue
+                        amp = h_amp.astype(np.float32)
 
                         try:
                             pkt_id = int(pkt.get("id", -1))

@@ -56,6 +56,7 @@ sys.path.insert(0, str(_PROJECT_ROOT / "model"))
 from parse_csi import CSIDataReader, extract_amplitude_phase
 from csi_dsp import CausalSOSFilter, StreamingResampler, design_bandpass_sos, timestamps_to_seconds
 from cnn_lstm import CSIFallDetector
+from dual_link import AGCFaultGuard
 
 logger = logging.getLogger("CSI_FALL_DETECTOR")
 
@@ -182,6 +183,8 @@ class RealtimeFallDetector:
         )
         self.resampler = StreamingResampler(self.fs)
         self.hampel = StreamingHampel(self.hampel_window, self.hampel_threshold)
+        self.guard = AGCFaultGuard(log_mag_thresh=0.69, uniformity_tol=0.35, hold_limit=3)
+        self._last_good_sel = None
         self.filt_buf: collections.deque[np.ndarray] = collections.deque(
             maxlen=self.window_size
         )
@@ -263,6 +266,13 @@ class RealtimeFallDetector:
             return None
 
         sel = raw_amp[self.subcarrier_cols] if self.subcarrier_cols is not None else raw_amp
+
+        # AGC Fault Guard: Suppress common-mode multiplicative jumps/drops
+        is_ok, _ = self.guard.check(sel)
+        if not is_ok and self._last_good_sel is not None:
+            sel = self._last_good_sel.copy()
+        else:
+            self._last_good_sel = sel.copy()
 
         for row in self.resampler.push(t, sel):
             # Identical chain to PreprocessingPipeline.filter_recording

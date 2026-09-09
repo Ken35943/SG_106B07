@@ -45,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parse_csi import CSIDataReader, extract_amplitude_phase
 from csi_dsp import (
     select_subcarriers, hampel_filter, design_bandpass_sos,
-    CausalSOSFilter, ht40_htltf_layout, HT40_TOTAL_ENTRIES
+    CausalSOSFilter, ht40_htltf_layout, HT40_TOTAL_ENTRIES,
+    StreamingResampler
 )
 from dual_link import AGCFaultGuard
 from realtime_detect import StreamingHampel
@@ -88,7 +89,8 @@ class ActivityWorker(threading.Thread):
         # DSP Setup
         self.sos = design_bandpass_sos(100.0, 0.5, 40.0, 4)
         self.filter = CausalSOSFilter(self.sos)
-        self.guard = AGCFaultGuard(log_mag_thresh=0.69, hold_limit=6)
+        self.resampler = StreamingResampler(100.0)
+        self.guard = AGCFaultGuard(log_mag_thresh=0.69, uniformity_tol=0.35, hold_limit=3)
         self.hampel = StreamingHampel(half_window=3, threshold=2.5)
         self._last_good_occ = None
         self.sub_cols = None
@@ -105,7 +107,9 @@ class ActivityWorker(threading.Thread):
         else:
             self._run_serial()
 
-    def _process_packet(self, amp: np.ndarray):
+    def _process_packet(self, amp: np.ndarray, t: Optional[float] = None):
+        if t is None:
+            t = time.time()
         num_sub = len(amp)
         if self.sub_cols is None:
             self.sub_cols, _ = select_subcarriers(amp[None, :])
@@ -126,41 +130,44 @@ class ActivityWorker(threading.Thread):
         else:
             self._last_good_occ = x_occ.copy()
 
-        # Log transform
-        x_log = 20.0 * np.log10(x_occ + 1.0)
+        # Resample onto strict 100 Hz grid (bridges packet-loss air drops seamlessly)
+        for row in self.resampler.push(t, x_occ):
+            # Log transform
+            x_log = 20.0 * np.log10(row + 1.0)
 
-        # Hampel outlier filtering: eliminates isolated spikes before bandpass filter
-        h_log = self.hampel.process(x_log)
-        if h_log is None:
-            return
+            # Hampel outlier filtering: eliminates isolated spikes before bandpass filter
+            h_log = self.hampel.process(x_log)
+            if h_log is None:
+                continue
 
-        # Filter step (causal SOS Butterworth 0.5–40 Hz)
-        filtered = self.filter.process(h_log[None, :])[0]
+            # Filter step (causal SOS Butterworth 0.5–40 Hz)
+            filtered = self.filter.process(h_log[None, :])[0]
 
-        # Rate counter
-        self._pkt_count += 1
-        now = time.time()
-        if now - self._last_rate_time >= 1.0:
-            self.packet_rate = self._pkt_count / (now - self._last_rate_time)
-            self._pkt_count = 0
-            self._last_rate_time = now
+            # Rate counter
+            self._pkt_count += 1
+            now = time.time()
+            if now - self._last_rate_time >= 1.0:
+                self.packet_rate = self._pkt_count / (now - self._last_rate_time)
+                self._pkt_count = 0
+                self._last_rate_time = now
 
-        # Update buffer
-        with self.lock:
-            self.history_filtered = np.roll(self.history_filtered, -1, axis=0)
-            self.history_filtered[-1, :] = filtered[self.plot_indices]
+            # Update buffer
+            with self.lock:
+                self.history_filtered = np.roll(self.history_filtered, -1, axis=0)
+                self.history_filtered[-1, :] = filtered[self.plot_indices]
 
-            # Motion energy: variance across the recent 60 frames (~0.6s)
-            recent = self.history_filtered[-60:]
-            var_sub = np.var(recent, axis=0)
-            self.motion_energy = float(np.mean(var_sub))
+                # Motion energy: variance across the recent 60 frames (~0.6s)
+                recent = self.history_filtered[-60:]
+                var_sub = np.var(recent, axis=0)
+                self.motion_energy = float(np.mean(var_sub))
 
-            # Dynamic classification: Walking vs Sitting
-            # Baseline quiet sitting in room is ~0.15–0.30, walking is >0.45
-            energy_score = np.clip((self.motion_energy - 0.22) / 0.40, 0.0, 1.0)
-            self.walking_prob = float(energy_score)
-            self.is_walking = self.walking_prob > 0.50
-            self.has_new_data = True
+                # Dynamic classification: Walking vs Sitting
+                # Baseline quiet sitting in room is ~0.15–0.30, walking is >0.45
+                energy_score = np.clip((self.motion_energy - 0.22) / 0.40, 0.0, 1.0)
+                self.walking_prob = float(energy_score)
+                self.is_walking = self.walking_prob > 0.50
+                self.latest_raw_amp = row
+                self.has_new_data = True
 
     def _run_replay(self):
         logger.info(f"Replaying: {self.replay_path}")
@@ -170,7 +177,7 @@ class ActivityWorker(threading.Thread):
         n = len(data)
         idx = 0
         while self.running:
-            self._process_packet(data[idx])
+            self._process_packet(data[idx], time.time())
             idx = (idx + 1) % n
             time.sleep(0.01)
 
@@ -186,7 +193,7 @@ class ActivityWorker(threading.Thread):
             else:
                 noise = np.random.normal(0, 0.4, n_sub)
             amp = np.clip(base + noise, 1.0, 150.0).astype(np.float64)
-            self._process_packet(amp)
+            self._process_packet(amp, time.time())
             t += 1
             time.sleep(0.01)
 
@@ -207,8 +214,9 @@ class ActivityWorker(threading.Thread):
                             target_mac = mac
                             logger.info(f"Locked MAC: {target_mac}")
                         if mac == target_mac:
+                            t_pkt = time.time()
                             amp, _ = extract_amplitude_phase(pkt["raw_data"])
-                            self._process_packet(amp)
+                            self._process_packet(amp, t_pkt)
         except Exception as e:
             logger.error(f"Serial worker error: {e}")
 

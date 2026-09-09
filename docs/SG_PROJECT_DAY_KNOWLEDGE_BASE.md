@@ -154,9 +154,9 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
   $$\text{lr}_k = \log \frac{A_k[t]}{A_k[t-1]}$$
 - คำนวณค่าเฉลี่ย $\mu = \text{mean}(\text{lr})$ และส่วนเบี่ยงเบนมาตรฐาน $\sigma = \text{std}(\text{lr})$
 - **เกณฑ์การตรวจจับ**:
-  $$\text{Is Glitch} \iff (\sigma < 0.35) \land (|\mu| > 0.69)$$
-  (ถ้าทุก Subcarrier ขยับพร้อมกันอย่างเป็นระเบียบ และขนาดการกระโดดมากกว่า 2 เท่า)
-- เมื่อตรวจพบ เฟรมนั้นจะถูกระงับไม่ให้นำไปใช้ โดยคงค่าของเฟรมปกติก่อนหน้าไว้แทน
+  $$\text{Is Glitch} \iff (|\mu| \ge 0.69) \land (\sigma \le 0.35)$$
+  (ถ้าทุก Subcarrier ขยับพร้อมกันอย่างเป็นระเบียบ $\sigma \le 0.35$ และขนาดการกระโดด/วูบมากกว่า 2 เท่า $|\mu| \ge 0.69 \approx \pm 6\text{ dB}$; การเดินของมนุษย์จริงจะเกิด Frequency-Selective Multipath ซึ่งทำให้ $\sigma > 0.35$ เสมอ จึงไม่ถูกตรวจจับผิดพลาด)
+- เมื่อตรวจพบ เฟรมนั้นจะถูกระงับไม่ให้นำไปใช้ โดยคงค่าของเฟรมปกติก่อนหน้าไว้แทน (สูงสุดไม่เกิน 3 เฟรม เพื่อไม่ให้เกิดอาการค้างแบน)
 
 #### ขั้นที่ 2: `StreamingHampel` (Rolling Median & MAD Filter — Quasi-Causal)
 - สัญญาณจะถูกส่งเข้าสู่ตัวกรอง Hampel Filter แบบ Streaming (ทำงานแบบ Quasi-Causal โดยมี bounded look-ahead delay ประมาณ 50 ms ที่ 100 Hz เนื่องจากใช้หน้าต่าง $2k+1$ แซมเปิล โดยคืนค่าของ sample กลาง):
