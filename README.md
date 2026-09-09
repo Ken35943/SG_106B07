@@ -57,16 +57,16 @@ This project implements an end-to-end wireless sensing system using **Channel St
                                                           Zero-latency reader thread
                                                                       │
                                                                       ▼
-                                                          [Uniform 100 Hz Resampler]
-                                                          Bridges serial arrival jitter
-                                                                      │
-                                                                      ▼
                                                           [Hardware AGCFaultGuard]
                                                           Blocks PHY gain-switch steps
                                                                       │
                                                                       ▼
+                                                          [Uniform 100 Hz Resampler]
+                                                          Bridges serial arrival jitter
+                                                                      │
+                                                                      ▼
                                                           [Streaming Hampel Filter]
-                                                          Median outlier suppression
+                                                          Median outlier suppression (k=3, ~30 ms)
                                                                       │
                                                                       ▼
                                                            [Causal SOS Bandpass]
@@ -80,11 +80,12 @@ This project implements an end-to-end wireless sensing system using **Channel St
                                                           [CNN-BiLSTM + Attention]
                                                           Spatial + Temporal Inference
                                                                       │
-                                            ┌─────────────────────────┴─────────────────────────┐
-                                            ▼                                                   ▼
-                                 [Real-Time Fall Engine]                             [Activity Monitor GUI]
-                                 scripts/realtime_detect.py                          scripts/realtime_activity_demo.py
-                                 Threshold: 80% | Audible Buzzer                     60 FPS Waveform + Motion Gauge
+                                          ┌───────────────────────────┴───────────────────────────┐
+                                          ▼                                                       ▼
+                       [Unified Real-Time Dashboard (Flagship)]                      [Standalone Headless Engine]
+                       scripts/realtime_unified_monitor.py                           scripts/realtime_detect.py
+                       60 FPS HUD: Walking / Sitting / Fall Alert                    Terminal CLI Fall Detector
+                       Dual Gauges + Physical Motion Gate + Buzzer                   Threshold: 80% | Audible Buzzer
 ```
 
 ---
@@ -123,11 +124,11 @@ At fringe signal levels, the ESP32 Wi-Fi PHY AGC switches internal analog gain s
 - **The Solution**: An online metric tracking frame-to-frame log-ratio uniformity across subcarriers:
   $$\mu = \text{mean}\left(\log \frac{A_k[t]}{A_k[t-1]}\right), \quad \sigma = \text{std}\left(\log \frac{A_k[t]}{A_k[t-1]}\right)$$
   When $\sigma \approx 0$ (< 0.35) while $|\mu|$ is large (> 0.69 $\approx 6 \text{ dB}$), the frame is flagged as an artificial gain step and suppressed, preventing severe filter ringing.
-- **Note**: `AGCFaultGuard` is currently deployed in the real-time Activity Monitor GUI (`realtime_activity_demo.py`), `visualize_dual.py`, and `dual_link.py`. The Fall Detection runtime uses `StreamingHampel` as its primary defense.
+- **Note**: `AGCFaultGuard` is directly integrated into the primary streaming pipeline of the Flagship Unified Dashboard (`scripts/realtime_unified_monitor.py`), as well as `realtime_activity_demo.py`, `visualize_dual.py`, and `dual_link.py`.
 
 ### 2. Streaming Hampel Filter (`StreamingHampel`, Low-Latency / Quasi-Causal)
 Isolated packet corruptions and RF noise impulses act as step inputs to narrow IIR bandpass filters, causing impulse ringing.
-- **The Solution**: A streaming sliding-window Hampel filter with bounded look-ahead delay (~50 ms at 100 Hz due to a centered $2k+1$ window) computing the rolling median and Median Absolute Deviation (MAD):
+- **The Solution**: A streaming sliding-window Hampel filter with bounded look-ahead delay ($\approx 30\text{ ms}$ at 100 Hz due to a centered $2k+1=7$ window with half-window $k=3$) computing the rolling median and Median Absolute Deviation (MAD):
   $$\text{MAD} = 1.4826 \times \text{median}(|x - \text{median}(x)|)$$
   Outliers exceeding threshold $\times \text{MAD}$ are replaced with the local median prior to bandpass filtering, stabilizing the IIR state.
 
@@ -179,25 +180,27 @@ The model was trained and evaluated under strict **recording-level zero-leakage 
 | **Daily Activities** | Real Walking / Sitting | Real Walking (10) + Sitting (10) + Real Falls (5) | Full multi-class activity coverage (37 sessions, 889 windows) |
 | **Signal Conditioning** | Raw with AGC gain-step jumps | **Causal DSP (SOS Bandpass + Hampel + Resampler)** | Stabilized baseline ($0.10 - 0.18\text{ dB}^2$), zero plateaus |
 | **Validation Loss / Acc** | 0.4228 / 74.24% | **0.1307 / 96.64%** | **69% loss reduction, +22.40% validation gain** |
-| **Test Accuracy** | 42.6% (Single-class test) | **81.05% (Balanced 153 windows)** | Zero-leakage `GroupShuffleSplit` across held-out recordings |
-| **Fall Sensitivity (Recall)**| N/A | **95.12% (39 of 41 falls caught)** | Critical safety metric for life-threatening falls |
-| **Non-Fall Specificity** | N/A | **97.70% (Minimal false alarms)** | Prevents user alert fatigue in daily life |
+| **Test Accuracy** | 42.6% (Single-class test) | **81.05% (153 windows: 41 Fall / 112 Non-Fall)** | Zero-leakage `GroupShuffleSplit` across held-out recordings |
+| **Fall Sensitivity (Recall)**| N/A | **95.12% (39 of 41 fall windows detected)** | Critical safety metric for life-threatening falls |
+| **Non-Fall Specificity** | N/A | **75.89% (85 of 112 normal windows correct)** | True Negative Rate (Non-Fall Precision: 97.70%) |
 | **Fall ROC-AUC** | N/A | **0.9046** | High discriminative capacity ($> 0.90$) |
 | **Fall PR-AUC** | N/A | **0.7160** | Accurate rare-event detection on held-out test split |
 | **Live Interface** | Terminal output | **Interactive 60 FPS GUI + Real-Time Buzzer Alarm** | Ready for live stage & interactive judge demonstration |
 
-#### Detailed Test Set Metrics (Held-Out Split, N=153)
+#### Detailed Test Set Metrics (Held-Out Split, N=153: 41 Fall / 112 Non-Fall)
 
-| Metric | Held-Out Test Set (N=153) | Validation Checkpoint (Epoch 14) | Notes |
+| Metric | Held-Out Test Set (N=153) | Validation Checkpoint (Epoch 14) | Notes & Formulas |
 |:---|:---:|:---:|:---|
 | **Overall Accuracy** | **81.05%** | **96.64%** | Generalisation across held-out test recordings |
-| **Fall Sensitivity (Recall)** | **95.12%** | — | **39 out of 41 fall windows successfully detected** |
-| **Non-Fall Precision** | **97.70%** | — | High reliability; 85/87 normal predictions are truly normal |
+| **Fall Sensitivity (Recall)** | **95.12%** | — | **39 out of 41 fall windows successfully detected** ($TP=39, FN=2$) |
+| **Non-Fall Specificity** | **75.89%** | — | True Negative Rate: $TN / (TN + FP) = 85 / 112$ |
+| **Non-Fall Precision** | **97.70%** | — | High reliability: $TN / (TN + FN) = 85 / 87$ normal predictions are true |
+| **Fall Precision** | **59.09%** | — | Positive Predictive Value: $TP / (TP + FP) = 39 / 66$ |
 | **Weighted F1-Score** | **0.8207** | — | Harmonic balance across imbalanced test distribution |
-| **Fall-Class F1-Score** | **0.7290** | — | Focus metric for the rare event (Fall) |
+| **Fall-Class F1-Score** | **0.7290** | — | Harmonic mean of Fall Precision (59.09%) and Recall (95.12%) |
 | **ROC-AUC (Fall as Positive)**| **0.9046** | — | Excellent discriminative power ($> 0.90$) |
 | **PR-AUC (Fall as Positive)** | **0.7160** | — | Area under Precision-Recall curve for rare event |
-| **Best Validation Loss** | — | **0.1307** | Early stopping checkpoint (Epoch 14 of 29) |
+| **Validation Selection** | — | **Val Loss: 0.1307** | Optimal checkpoint selected by minimum validation loss (Epoch 14 of 29) |
 | **Inference Latency** | **< 3.2 ms** | **< 3.2 ms** | RTX 3050 Laptop GPU / CPU (real-time capable) |
 
 #### Live Hardware Verification & Empirical Operating Characteristics (TRL 4–5 Demo)

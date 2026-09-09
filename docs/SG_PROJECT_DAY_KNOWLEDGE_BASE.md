@@ -149,7 +149,7 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 
 เพื่อแก้ปัญหานี้ เราได้ออกแบบระบบป้องกัน 2 ขั้นตอนก่อนที่สัญญาณจะเข้าสู่ Bandpass Filter:
 
-> **หมายเหตุสำหรับความถูกต้อง**: `AGCFaultGuard` ถูกนำไปใช้ใน Real-time Activity Monitor GUI (`realtime_activity_demo.py`), Dual-Link Visualizer (`visualize_dual.py`) และ `dual_link.py` แล้ว ส่วน Fall Detection Runtime (`realtime_detect.py`) ปัจจุบันใช้ `StreamingHampel` เป็นหลัก — การรวม AGCFaultGuard เข้าไปใน Fall Detector เป็นงานที่วางแผนไว้ในขั้นต่อไป
+> **หมายเหตุสำหรับความถูกต้อง**: ปัจจุบัน `AGCFaultGuard` ได้ถูกนำมาผสานเข้ากับท่อรับสัญญาณหลักของแดชบอร์ดเรือธง **Unified Real-Time Dashboard (`scripts/realtime_unified_monitor.py`)** โดยตรง รวมถึงใน `realtime_activity_demo.py`, `visualize_dual.py` และ `dual_link.py` ทำให้ทั้งการจำแนกกิจกรรมและการตรวจจับการหกล้มได้รับการปกป้องจากปัญหาเข็มกระชากของ AGC ตั้งแต่ต้นทาง
 
 #### ขั้นที่ 1: `AGCFaultGuard` (Common-Mode Ratio Uniformity Metric)
 - **หลักการ**: การเคลื่อนไหวของมนุษย์จริงในห้องจะทำให้เกิด **Frequency-Selective Fading** (Subcarrier แต่ละตัวจะเปลี่ยนไปคนละทิศคนละทางตามระยะห่างคลื่น) แต่บั๊กของ AGC จะคูณสัญญาณทุก Subcarrier ด้วยสเกลเดียวกันทั้งหมด
@@ -162,10 +162,10 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 - เมื่อตรวจพบ เฟรมนั้นจะถูกระงับไม่ให้นำไปใช้ โดยคงค่าของเฟรมปกติก่อนหน้าไว้แทน (สูงสุดไม่เกิน 3 เฟรม เพื่อไม่ให้เกิดอาการค้างแบน)
 
 #### ขั้นที่ 2: `StreamingHampel` (Rolling Median & MAD Filter — Quasi-Causal)
-- สัญญาณจะถูกส่งเข้าสู่ตัวกรอง Hampel Filter แบบ Streaming (ทำงานแบบ Quasi-Causal โดยมี bounded look-ahead delay ประมาณ 50 ms ที่ 100 Hz เนื่องจากใช้หน้าต่าง $2k+1$ แซมเปิล โดยคืนค่าของ sample กลาง):
+- สัญญาณจะถูกส่งเข้าสู่ตัวกรอง Hampel Filter แบบ Streaming (ทำงานแบบ Quasi-Causal โดยมี bounded look-ahead delay ประมาณ $\approx 30\text{ ms}$ ที่กริด 100 Hz เนื่องจากใน Unified Demo ใช้หน้าต่าง $k=3$ หรือ centered window ขนาด $2k+1 = 7$ แซมเปิล โดยคืนค่าของ sample กลาง):
   $$\text{MAD} = 1.4826 \times \text{median}(|x - \text{median}(x)|)$$
 - ค่าที่เบี่ยงเบนเกิน threshold $\times \text{MAD}$ จะถูกแทนที่ด้วยค่ามัธยฐานท้องถิ่น (Local Median)
-- **หมายเหตุ**: ค่า half-window และ threshold ที่ใช้ในแต่ละ runtime ยังไม่ล็อกเป็นชุดเดียวกัน — GUI ใช้ half=3, threshold=2.5 ส่วน Fall Detector ใช้ค่าจาก `config.yaml` (half=5, threshold=3.0)
+- **หมายเหตุ**: Unified Demo และ GUI ใช้ half_window = 3 (หน่วง ~30 ms, threshold=2.5) เพื่อลด Latency สูงสุด ส่วนการรัน Headless CLI ตัวเก่าใช้ half=5 (~50 ms)
 - **ผลลัพธ์**: ขจัดเข็มกระชากเดี่ยวจาก AGC ได้อย่างมีประสิทธิภาพในทุกกรณีที่ทดสอบ ป้องกันไม่ให้ตัวกรอง IIR เกิดอาการ Ringing ระดับพลังงานพื้นฐานเวลานั่งนิ่งจึงลดลงมาเสถียรอยู่ที่ **$0.10 - 0.18 \text{ dB}^2$**
 
 ---
@@ -181,12 +181,15 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 
 **การแก้ปัญหาด้วย `GroupShuffleSplit`**:
 เราบันทึกข้อมูลและสร้างอาเรย์ระบุกลุ่มการบันทึก (`groups.npy`):
-- การันตีว่าโมเดลประเมินผลบนข้อมูลที่ไม่เคยเห็นมาก่อน (Unseen Session) — ค่า **Validation Accuracy ของ Checkpoint ที่เลือก (โดย val loss ต่ำสุด) คือ 96.64%** (Epoch 14, val loss = 0.1307)
-- **การประเมินผลบน Held-Out Test Set (6 การทดลอง 153 หน้าต่างที่ไม่เคยเห็นตอนเทรน)**:
-  - **Overall Accuracy**: **81.05%**
-  - **Fall Sensitivity (Recall)**: **95.12%** (ตรวจจับการล้มได้ถูกต้องถึง 39 จาก 41 หน้าต่าง)
-  - **Non-Fall Specificity (Precision)**: **97.70%** (ทำนายกิจกรรมปกติถูกต้องอย่างแม่นยำ)
+- การันตีว่าโมเดลประเมินผลบนข้อมูลที่ไม่เคยเห็นมาก่อน (Unseen Session) — จุด Checkpoint ที่ดีที่สุดถูกคัดเลือกด้วย **Validation Loss ต่ำสุด (Epoch 14: Val Loss = 0.1307, Val Accuracy = 96.64%)**
+- **การประเมินผลบน Held-Out Test Set (153 หน้าต่าง: 41 Fall Windows / 112 Non-Fall Windows)**:
+  - **Overall Accuracy**: **81.05%** (124 / 153 หน้าต่าง)
+  - **Fall-Window Recall (Sensitivity)**: **95.12%** (ตรวจจับ fall windows ได้ถูกต้องถึง 39 จาก 41 windows; $TP=39, FN=2$)
+  - **Non-Fall Specificity**: **75.89%** ($TN / (TN + FP) = 85 / 112$ หน้าต่างปกติทำนายถูกต้อง)
+  - **Non-Fall Precision**: **97.70%** ($TN / (TN + FN) = 85 / 87$ เมื่อทำนายว่าปกติ โอกาสถูกต้องสูงถึง 97.70%)
+  - **Fall Precision**: **59.09%** ($TP / (TP + FP) = 39 / 66$)
   - **Weighted F1-Score**: **0.8207**
+  - **Fall-Class F1-Score**: **0.7290**
   - **Fall ROC-AUC**: **0.9046** (ความสามารถในการจำแนกคลาสล้มอยู่ในระดับดีเยี่ยม > 0.90)
   - **Fall PR-AUC**: **0.7160**
 
@@ -220,7 +223,7 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 
 ### 6.1 Fall Detection Runtime Engine (`scripts/realtime_detect.py`)
 - ระบบเฝ้าระวังความปลอดภัยฉุกเฉิน ทำงานแบบ Command Line
-- ประมวลผลแบบ Low-Latency Streaming (Bandpass Filter เป็น stateful causal SOS, Hampel Filter มี bounded delay ~50 ms)
+- ประมวลผลแบบ Low-Latency Streaming (Bandpass Filter เป็น stateful causal SOS, Hampel Filter มี bounded look-ahead delay $\approx 30\text{ ms}$ ในโหมด Low-latency $k=3$ หรือ ~50 ms ในค่า default CLI $k=5$)
 - รันโมเดลทำนายผลทุกๆ 250 มิลลิวินาที (Stride 25 แซมเปิล)
 - มีระบบยืนยันผล 2 หน้าต่างต่อเนื่อง (`consecutive_windows: 2`) เพื่อป้องกัน False Alarm
 - เมื่อตรวจพบการล้มเกิน Threshold 80% ระบบจะส่งเสียงสัญญาณเตือนภัย (Audible Buzzer) และเข้าสู่โหมด Cooldown 5 วินาที
@@ -234,8 +237,8 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 
 ### 6.3 ระบบแดชบอร์ดรวมศูนย์ Unified Real-Time Dashboard (`scripts/realtime_unified_monitor.py`)
 - **ผสานระบบจำแนกกิจกรรมประจำวัน (เดิน/นั่งนิ่ง) และการตรวจจับการหกล้มฉุกเฉินไว้ในหน้าต่างเดียว**:
-  - 🚶 **WALKING / ACTIVE MOTION** (แถบสีฟ้า Cyan): เมื่อมีการเดินหรือเคลื่อนไหวในห้อง ($E \ge 0.50\text{ dB}^2$)
-  - 🧘 **SITTING STILL / QUIET** (แถบสีเขียวมรกต Emerald): เมื่อผู้ใช้นั่งนิ่ง อ่านหนังสือ หรือไม่มีการเคลื่อนไหว ($E < 0.50\text{ dB}^2$)
+  - 🚶 **WALKING / ACTIVE MOTION** (แถบสีฟ้า Cyan): เมื่อมีการเดินหรือเคลื่อนไหวในห้อง ($E \ge 0.40\text{ dB}^2$)
+  - 🧘 **SITTING STILL / QUIET** (แถบสีเขียวมรกต Emerald): เมื่อผู้ใช้นั่งนิ่ง อ่านหนังสือ หรือไม่มีการเคลื่อนไหว ($E < 0.40\text{ dB}^2$)
   - 🚨 **FALL DETECTED / EMERGENCY ALERT** (แถบสีแดงกระพริบ Flashing Red): เมื่อเกิดการล้มกระแทกพื้น พร้อมส่งเสียงร้อง Buzzer เตือนภัยฉุกเฉินผ่านลำโพง
 - **Dual Telemetry Gauges**:
   - เกจวัดพลังงานการเคลื่อนไหว **Motion Energy Gauge** ($0 - 25\text{ dB}^2$)
@@ -303,7 +306,17 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
    - มาตรฐานความรัดกุม: การใช้ `GroupShuffleSplit` ป้องกัน Data Leakage [12]
 8. **สไลด์ที่ 8: ผลการทดลองและประสิทธิภาพ (Experimental Results)**
    - แสดง Confusion Matrix, ROC Curve (AUC = 0.9046), PR Curve (AUC = 0.7160) และกราฟการเทรน
-   - **ตัวเลขชี้วัดผลงานจริงบน Held-Out Test Set**: Accuracy 81.05%, Fall Sensitivity (Recall) **95.12%**, Non-Fall Specificity 97.70%, F1 0.8207 (Checkpoint Val Accuracy 96.64%)
+   - **ตัวเลขชี้วัดผลงานจริงบน Held-Out Test Set (153 windows: 41 Fall / 112 Non-Fall)**:
+     - **Test Accuracy**: **81.05%** (124 / 153 หน้าต่าง)
+     - **Fall-Window Recall (Sensitivity)**: **95.12%** (ตรวจจับ fall windows ได้ 39 จาก 41 windows; $TP=39, FN=2$)
+     - **Non-Fall Specificity**: **75.89%** ($TN / (TN + FP) = 85 / 112$ หน้าต่างปกติทำนายถูกต้อง)
+     - **Non-Fall Precision**: **97.70%** ($85 / 87$ เมื่อทำนายว่าปกติ โอกาสถูกต้องสูงถึง 97.70%)
+     - **Fall Precision**: **59.09%** ($39 / 66$)
+     - **Weighted F1-Score**: **0.8207** | **Fall-Class F1-Score**: **0.7290**
+     - **ROC-AUC**: **0.9046** | **PR-AUC**: **0.7160**
+     - *(คัดเลือกโมเดลจากจุด Validation Loss ต่ำสุด Epoch 14: Val Loss 0.1307, Val Acc 96.64%)*
+   - **ประโยคการนำเสนอที่ถูกต้อง รัดกุม และปลอดภัยที่สุดบนเวที**:
+     > *"On the held-out recording-level test set, the model achieved 81.05% accuracy with 95.12% fall-window recall and 75.89% non-fall specificity. We also verified the system live using five real forward-fall recordings on safety padding. The main remaining limitation is false alarms during prolonged continuous walking, which we plan to address using post-fall immobility verification and a larger gait dataset."*
    - **การยืนยันผลจากข้อมูลมนุษย์จริง**: อธิบายว่าชุดข้อมูลมีข้อมูลการล้มจริงไปข้างหน้า 5 ตัวอย่างที่มี Contrast ของ Doppler พุ่งสูง 17–109 เท่า ร่วมกับข้อมูลการเดินและการนั่งจริง
    - **ความโปร่งใสทางวิชาการและจริยธรรม**: ชี้แจงว่าทิศทางล้มไปข้างหลังและด้านข้างยังคงใช้สัญญาณสังเคราะห์เสริม เพื่อปกป้องความปลอดภัยของผู้ทดลองจากการบาดเจ็บ
    - ความเร็วการประมวลผล: ต่ำกว่า 3.2 มิลลิวินาทีต่อรอบ พร้อมสำหรับการใช้งานแบบ Real-time
@@ -378,7 +391,7 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 > **แนวคำตอบ**:  
 > "นี่คือจุดที่เราให้ความสำคัญมากที่สุดในด้านระเบียบวิธีวิจัยครับ  
 > เมื่อเราใช้ Sliding Window เลื่อนทีละ 50% หน้าต่างที่ติดกันจะมีข้อมูลดิบซ้อนทับกันอยู่ถึงครึ่งหนึ่ง หากใช้ฟังก์ชันสุ่มทั่วไป หน้าต่างจากช่วงวินาทีเดียวกันจะหลุดไปอยู่ทั้ง Train และ Test Set ทำให้โมเดลแอบดูข้อสอบและได้คะแนน Accuracy สูงเกินจริง [12]  
-> เราจึงใช้ **`GroupShuffleSplit`** โดยผูกหน้าต่างทั้งหมดที่บันทึกจากการทดลองรอบเดียวกันไว้ใน Group ID เดียวกัน และสุ่มแบ่งที่ระดับ Group ID เพื่อการันตีว่าข้อมูลใน Validation และ Test Set จะเป็นรอบการทดลองที่โมเดลไม่เคยเห็นมาก่อน ผลประเมินได้ Checkpoint Validation Accuracy 96.64% และเมื่อทดสอบกับ Held-out Test Set ได้ Accuracy 81.05%, Fall Sensitivity 95.12% และ ROC-AUC 0.9046  
+> เราจึงใช้ **`GroupShuffleSplit`** โดยผูกหน้าต่างทั้งหมดที่บันทึกจากการทดลองรอบเดียวกันไว้ใน Group ID เดียวกัน และสุ่มแบ่งที่ระดับ Group ID เพื่อการันตีว่าข้อมูลใน Validation และ Test Set จะเป็นรอบการทดลองที่โมเดลไม่เคยเห็นมาก่อน โดยคัดเลือก Checkpoint ที่ Validation Loss ต่ำสุดที่ 0.1307 (Val Accuracy 96.64%) และเมื่อทดสอบกับ Held-out Test Set (153 windows: 41 Fall / 112 Non-Fall) ได้ **Test Accuracy 81.05%, Fall-Window Recall (Sensitivity) 95.12% (ตรวจจับ fall windows ได้ 39 จาก 41 windows), Non-Fall Specificity 75.89% (Non-Fall Precision 97.70%) และ ROC-AUC 0.9046**  
 > ทั้งนี้ โครงงานได้ผสานข้อมูลการล้มจริงไปข้างหน้าของผู้ทดลองบนเบาะนิรภัยร่วมกับข้อมูลกิจกรรมจริง โดยยังคงสัญญาณสังเคราะห์ในทิศทางด้านข้างและด้านหลังไว้เพื่อความปลอดภัยของผู้ทดลองที่ไม่สามารถล้มกระแทกหลายทิศทางซ้ำๆ ได้ครับ"
 
 ---
@@ -420,7 +433,7 @@ I (430451) csi_recv: compensate_gain 0.817523, agc_gain 26
 
 ### Q13: ในการทดสอบ Live Demo สดๆ บนบอร์ดจริง พบว่าถ้าเดินไปเรื่อยๆ มี False Positive ดังขึ้นเป็นระยะ แต่ถ้าอยู่นิ่งแล้วล้มจะตรวจจับได้ 100% สภาพนี้อธิบายได้อย่างไรในเชิงวิศวกรรม?
 > **แนวคำตอบ**:  
-> "นี่คือข้อค้นพบเชิงประจักษ์ที่มีค่ายิ่งจากการทดสอบฮาร์ดแวร์จริงในสถานะ **Working Demo (TRL 4–5)** ครับ:  
+> "นี่คือข้อค้นพบเชิงประจักษ์ที่มีค่ายิ่งจากการทดสอบฮาร์ดแวร์จริงในสถานะ **Working Demo (TRL 4–5)** ซึ่งสอดคล้องกับผลการทดสอบบน Held-Out Test Set ที่พบว่า **Fall-Window Recall สูงถึง 95.12% ในขณะที่ Non-Fall Specificity อยู่ที่ 75.89% (Fall Precision 59.09%)** ครับ:  
 > 1. **Zero False Negative สำหรับ Life-Safety**: เมื่อผู้ทดสอบอยู่นิ่งแล้วทิ้งตัวล้มลง ระบบตรวจจับได้ 100% ทุกครั้ง (Confidence 99.8%, Impact Energy > 2.38 dB²) ซึ่งในทางการแพทย์ **การไม่ปล่อยให้คนล้มหลุดรอด (Zero False Negative)** คือเป้าหมายที่สำคัญที่สุด  
 > 2. **สาเหตุของ False Positive ตอนเดินต่อเนื่อง**: เกิดจาก 2 ปัจจัยร่วมกันครับ คือ (ก) ขนาด Dataset การเดินในห้องเดียวยังมีจำกัด (10 recordings) ทำให้การแกว่งแขนและก้าวขาต่อเนื่องไปมาสะสมคลื่นสะท้อน Multipath ในห้องแคบ จนพลังงานการเคลื่อนไหวสูงล้นไปแตะขอบเขตการตัดสินใจของคลาสล้มในบางจังหวะ  
 > 3. **ทางออกเชิงวิศวกรรมที่เตรียมไว้ในแผนระยะถัดไป (Production Solution)**: การล้มจริงของผู้สูงอายุมีลักษณะสรีรวิทยาเฉพาะตัวคือ **'ล้มกระแทก $\rightarrow$ แล้วต้องนอนนิ่งค้างบนพื้น (The Long Lie)'** [3, 4] ในขณะที่คนเดินจะยังคงก้าวขาขยับตัวต่อเนื่อง ดังนั้น การเพิ่ม **State Machine ตรวจจับความสงบนิ่งหลังกระแทก (Post-Fall Immobility Criterion 1.5–2.0 วินาที)** จะสามารถตัด False Positive จากการเดินต่อเนื่องได้อย่างเด็ดขาด 100% ครับ"
