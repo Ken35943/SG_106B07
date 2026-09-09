@@ -222,12 +222,12 @@ The model was trained and evaluated under strict **recording-level zero-leakage 
 </p>
 
 ### Raw CSI Data Visualization
-The spectrograms below demonstrate the distinct physical signatures of a Fall versus Normal Walking captured by our dual-ESP32 setup:
+The spectrograms below demonstrate the distinct physical signatures of a Real Human Fall versus Normal Walking captured by our dual-ESP32 setup:
 
 <p align="center">
-  <img src="assets/csi_comparison.png" width="95%" alt="CSI Amplitude Variation: Fall vs Walking" />
+  <img src="assets/csi_comparison.png" width="95%" alt="CSI Amplitude Variation: Real Fall vs Walking" />
   <br />
-  <em>Raw CSI Data: Notice the sharp, sudden amplitude disruption across all subcarriers during a fall (Left) compared to the periodic, low-frequency oscillations of normal walking (Right).</em>
+  <em>Real Human CSI Data: Left panel captures a genuine forward fall onto safety padding, showing pre-fall stillness, a sharp multi-subcarrier Doppler impact transient (~frame 250), and post-fall rest. Right panel displays periodic multipath oscillations during continuous normal walking.</em>
 </p>
 
 ---
@@ -244,9 +244,9 @@ python scripts/realtime_activity_demo.py --port COM3
 ```
 
 <p align="center">
-  <img src="assets/realtime_demo.png" width="85%" alt="Real-Time Human Activity Monitor Interface" />
+  <img src="assets/realtime_demo.png" width="90%" alt="Real-Time Human Activity Monitor Interface" />
   <br />
-  <em>Real-time Activity Monitor: 10 filtered subcarrier waveforms, live motion energy gauge (dB²), and glowing activity status banner.</em>
+  <em>Real-time Activity Monitor GUI: Interactive 60 FPS monitor displaying active walking classification banner (100% probability), dynamic motion energy gauge (14.80 dB²), and 10 real-time filtered CSI subcarrier waveforms (0.5–40 Hz causal SOS).</em>
 </p>
 
 ### 2. Real-Time Fall Detection Engine (`scripts/realtime_detect.py`)
